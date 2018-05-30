@@ -4,4 +4,4 @@
 data/*
 
 # exception because git doesn't let you commit an empty dir
-data/.gitkeep
+!data/.gitkeep

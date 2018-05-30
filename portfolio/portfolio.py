@@ -11,25 +11,13 @@ class Nearest_neighbors_portfolio:
 
 
     # TODO: check if epsilon = 0.05 is correct
-    def __init__(self, num_samples, epsilon, lambda_):
-        self.num_samples = num_samples
+    def __init__(self, epsilon, lambda_):
         self.epsilon = epsilon
         self.lambda_ = lambda_
         
-   
-    # TODO: move to separate class
-    def run_simulation(self):
-        # load data
-        self.load_data_from_csv("X_nt.csv.short", "Y_nt.csv.short")
-        
-        # hyperparameter training
-        self.compute_full_information_hyperparameters()
-        self.compute_training_model_hyperparameters()
-        
-        # oos sample cost calculation
-        self.compute_full_information_oos_cost()
-        self.compute_training_model_oos_cost()
-        
+
+    def set_num_samples(self, num_samples):
+        self.num_samples = num_samples
 
     def compute_full_information_hyperparameters(self):
 
@@ -81,9 +69,7 @@ class Nearest_neighbors_portfolio:
 
 
         # PUT THIS BACK fi_learner_oos_cost = fi_learner_oos_cost/len(X_data)
-        fi_learner_oos_cost = fi_learner_oos_cost/50
-        
-        print(fi_learner_oos_cost)
+        return fi_learner_oos_cost/50
 
 
     def load_data_from_csv(self, x_csv_filename, y_csv_filename):
@@ -421,5 +407,4 @@ class Nearest_neighbors_portfolio:
 
             tr_learner_oos_cost_true += c_tr_true
 
-        tr_learner_oos_cost_true = tr_learner_oos_cost_true/num_oos_samples
-        print(tr_learner_oos_cost_true)
+        return tr_learner_oos_cost_true/num_oos_samples
