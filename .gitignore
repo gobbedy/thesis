@@ -1,0 +1,7 @@
+*.bck
+
+# exclude everything in data directory
+data/*
+
+# exception because git doesn't let you commit an empty dir
+data/.gitkeep
