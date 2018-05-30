@@ -3,16 +3,14 @@ import portfolio
 class Portfolio_simulator:
 
 
-    # TODO: check if epsilon = 0.05 is correct
     def __init__(self, num_iterations, num_samples_list):
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
         
-   
-    # TODO: move to separate class
+
     def run_simulation(self):
 
-        epsilon=0.05
+        epsilon=0.15
         lambda_=0.0
         nn_portfolio = portfolio.Nearest_neighbors_portfolio(epsilon, lambda_)
         

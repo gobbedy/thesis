@@ -10,7 +10,6 @@ import weighter
 class Nearest_neighbors_portfolio:
 
 
-    # TODO: check if epsilon = 0.05 is correct
     def __init__(self, epsilon, lambda_):
         self.epsilon = epsilon
         self.lambda_ = lambda_
@@ -27,31 +26,14 @@ class Nearest_neighbors_portfolio:
     def compute_training_model_hyperparameters(self):
 
         # Training data
-        ####perm = shuffle(1:size(self.X_data, 1))
+        train_perm = sorted(random.sample(range(len(self.X_data)), self.num_samples))
+        self.X_tr = self.X_data[train_perm]
+        self.Y_tr = self.Y_data[train_perm]
 
-        # shuffle data
-        ####self.X_data = self.X_data[perm, :]
-        ####self.Y_data = self.Y_data[perm, :]
-
-
-        # PUT THIS BACK
-        #train_perm = sorted(random.sample(range(len(X)), self.num_samples))
-        #self.X_tr = self.X_data[train_perm]
-        #self.Y_tr = self.Y_data[train_perm]
-
-        # PUT THIS BACK
-        #val_perm = sorted(list(set(range(len(X))) - set(train_perm)))
-        #self.X_val = self.X_data[val_perm]
-        #self.Y_val = self.Y_data[val_perm]
-
-
-        # train on first n samples; note: each row is a sample!
-        self.X_tr = self.X_data[0:self.num_samples]
-        self.Y_tr = self.Y_data[0:self.num_samples]
-
-        # all the non-training data is considered "validation" data -- but this is actually out of sample data! almost all the data is out of sample
-        self.X_val = self.X_data[self.num_samples:]
-        self.Y_val = self.Y_data[self.num_samples:]
+        # Validation data
+        val_perm = sorted(list(set(range(len(self.X_data))) - set(train_perm)))
+        self.X_val = self.X_data[val_perm]
+        self.Y_val = self.Y_data[val_perm]
 
         # Find an appropriate nn smoother using training data (learn the distance function itself, the number of nearest neighbours, and the type of smoother)
         print("Getting hyperparameters for training NN model...")
@@ -62,22 +44,18 @@ class Nearest_neighbors_portfolio:
     def compute_full_information_oos_cost(self):
 
         fi_learner_oos_cost = 0
-        # PUT THIS BACK for x_val in self.X_data:
-        for x_val in self.X_data[8:58]:
+        for x_val in self.X_data:
             c_fi, z_fi, b_fi, s_fi = self.portfolio_nn_nominal(self.Y_data, self.X_data, self.d_fi, self.k_fi, self.Sn_fi, x_val, verbose=False)
             fi_learner_oos_cost += c_fi
 
 
-        # PUT THIS BACK fi_learner_oos_cost = fi_learner_oos_cost/len(X_data)
-        return fi_learner_oos_cost/50
+        return fi_learner_oos_cost/len(self.X_data)
 
 
     def load_data_from_csv(self, x_csv_filename, y_csv_filename):
 
-        # PUT THIS BACK X_data = np.loadtxt(filename, delimiter=",")
-        # PUT THIS BACK Y_data = np.loadtxt(filename, delimiter=",")
-        self.X_data = np.loadtxt(x_csv_filename, delimiter=",", skiprows=1)
-        self.Y_data = np.loadtxt(y_csv_filename, delimiter=",", skiprows=1)
+        self.X_data = np.loadtxt(x_csv_filename, delimiter=",")
+        self.Y_data = np.loadtxt(y_csv_filename, delimiter=",")
 
 
     def loss(self, z, b, y):
@@ -113,8 +91,6 @@ class Nearest_neighbors_portfolio:
         mean_X = np.mean(X, 0)
         epsilonX = np.cov(X.T, bias=True) + np.identity(d_x)/n
 
-        #epsilonX = factorize(epsilonX)
-        #epsilonX = np.linalg.cholesky(epsilonX)
         # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
         (epsilonX, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
 
@@ -129,10 +105,7 @@ class Nearest_neighbors_portfolio:
         k_all = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
 
         # pick 20% of the original (training) samples as your validation set -- note: sorting not necessary
-        ## PUT THIS BACK AFTER TESTING val = sorted(random.sample(range(n), round(n*p)))
-        val = range(round(n*p))
-        #print(val)
-        #val = sample(1:n, round(Int, n*p), replace=false)
+        val = sorted(random.sample(range(n), round(n*p)))
 
         # the remaining 80% is your new "training" set
         train = sorted(list(set(range(n)) - set(val)))
@@ -236,8 +209,6 @@ class Nearest_neighbors_portfolio:
             # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
             dist_from_xbar = lambda x1: d(x1, xbar)
             dist = np.apply_along_axis(dist_from_xbar, 1, X)
-            #print(dist)
-            #print(d(X[6], xbar))
             # dist = [d(X[i], xbar ) for i in range(n)]
 
             perm = np.argsort(dist)
@@ -257,7 +228,6 @@ class Nearest_neighbors_portfolio:
             # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
             weight_from_xbar = lambda x1: Sn(x1, xbar)
             S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
-            #print(S)
             #S = [weight_fcn(X[i], xbar) for i in Nk]
 
             ## Prediction --> this is E[Y|X]!!!
@@ -273,7 +243,6 @@ class Nearest_neighbors_portfolio:
             print("**************************************")
             print("*** End Nearest Neighbors Learning ***")
 
-        #print(Yp)
         return Yp
     
     
@@ -284,10 +253,6 @@ class Nearest_neighbors_portfolio:
         n = np.size(Y, 0)
 
         d_y = np.size(Y, 1)
-        #if Y.ndim == 2:
-        #  d_y = np.size(Y, 1)
-        #else: # Y.ndim ==1
-        #  d_y = 1
 
         if verbose:
             print("# Start Portfolio Nominal NN Formulation")
@@ -364,47 +329,36 @@ class Nearest_neighbors_portfolio:
             print("*** End Portfolio Nominal NN Formulation ***")
             print("**********************************************")
 
-        #print("python portfolio nn nominal:")
-        #print(problem.value)
-        #print(z.value)
-        #print(problem.status)
-        #print("end python portfolio nn nominal")
-
-        #print("PORTFOLIO NN PYTHON END")
-
         return (problem.value, z.value, b.value, problem.status)
 
 
 
 
-    def compute_training_model_oos_cost(self):
+    def compute_training_model_oos_cost(self, verbose=False):
 
         print("Testing training model (TM) vs full information model (FIM) for TM trained with ", self.num_samples)
         print(" training samples...")
 
-        tr_learner_oos_cost_estimate=0
         tr_learner_oos_cost_true=0
-        #PUT THIS BACK num_oos_samples = size(self.Y_val, 1)
-        # OR BETTER in the loop just do for x_val in self.X_val:
-        num_oos_samples = 50
-        print("Performing out of sample test for both (full information and training) NN models with ", num_oos_samples, end='')
+        print("Performing out of sample test for both (full information and training) NN models with ", len(self.X_val), end='')
         print(" oos samples...")
-        for i in range(num_oos_samples):
+        for x_val in self.X_val:
 
-            if i%10 == 0:
-                print("out: ", i)
+            if verbose:
+                if i%10 == 0:
+                    print("out: ", i)
 
             # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.portfolio_nn_nominal(self.Y_tr, self.X_tr, self.d_tr, self.k_tr, self.Sn_tr, self.X_val[i], verbose=False)
+            c_tr, z_tr, b_tr, s_tr = self.portfolio_nn_nominal(self.Y_tr, self.X_tr, self.d_tr, self.k_tr, self.Sn_tr, x_val, verbose=False)
 
             # find b (VaR) analytically
-            b=value_at_risk.value_at_risk(self.X_val[i], z_tr, self.epsilon)
+            b=value_at_risk.value_at_risk(x_val, z_tr, self.epsilon)
 
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.nearest_neighbors_learner(training_loss, self.X_data, self.X_val[i], self.d_fi, self.k_fi, self.Sn_fi)
+            c_tr_true = self.nearest_neighbors_learner(training_loss, self.X_data, x_val, self.d_fi, self.k_fi, self.Sn_fi)
 
             tr_learner_oos_cost_true += c_tr_true
 
-        return tr_learner_oos_cost_true/num_oos_samples
+        return tr_learner_oos_cost_true/len(self.X_val)
