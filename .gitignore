@@ -1,4 +1,8 @@
 *.bck
+*.out
+*.log
+tmp*
+test.sh
 
 # exclude everything in data directory
 data/

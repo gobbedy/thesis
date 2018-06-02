@@ -1,18 +1,23 @@
 import portfolio
+import logging
+import sys
 
 class Portfolio_simulator:
 
 
-    def __init__(self, num_iterations, num_samples_list):
+    def __init__(self, name, num_iterations, num_samples_list):
+        self.name = name
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
-        
+
+    def __str__(self):
+        return self.name        
 
     def run_simulation(self):
 
         epsilon=0.15
         lambda_=0.0
-        nn_portfolio = portfolio.Nearest_neighbors_portfolio(epsilon, lambda_)
+        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_)
         
         # load data
         # TODO: switch back to full data
@@ -27,7 +32,12 @@ class Portfolio_simulator:
         # which samples are training vs validation
 
         # If this assumption is show to be incorrect something is wrong and we need to revisit.
+        
+        
+        # get full information hyperparameters
         nn_portfolio.compute_full_information_hyperparameters()
+        
+        # compute oos cost for full information model
         fi_oos_cost = nn_portfolio.compute_full_information_oos_cost()
 
         # outer loop especially useful at low number of samples
@@ -37,11 +47,14 @@ class Portfolio_simulator:
             
                 # set number of samples for training model to train on
                 nn_portfolio.set_num_samples(num_samples)
+                
+                # split the data into training vs validation
+                nn_portfolio.split_data()
 
-                # training model hyperparameter training
+                # get training model hyperparameters
                 nn_portfolio.compute_training_model_hyperparameters()
 
-                # oos sample cost calculation
+                # compute oos cost for training model
                 tr_oos_cost = nn_portfolio.compute_training_model_oos_cost()
                 
         print(fi_oos_cost)

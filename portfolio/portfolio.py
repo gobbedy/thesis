@@ -6,24 +6,45 @@ import cvxpy as cp
 import value_at_risk
 import smoother
 import weighter
+import logging
+import sys
+from decorators import timed
 
 class Nearest_neighbors_portfolio:
 
 
-    def __init__(self, epsilon, lambda_):
+    def __init__(self, name, epsilon, __lambda):
+        self.name = name
         self.epsilon = epsilon
-        self.lambda_ = lambda_
-        
+        self.__lambda = __lambda
+        self.configure_logger()
+
+    def __str__(self):
+        return self.name
+
+    def configure_logger(self):
+        # create logger
+        self.logger = logging.getLogger(self.name)
+        self.logger.propagate = 0
+        # set "verbosity"
+        self.logger.setLevel(logging.INFO)
+        # create console handler
+        self.ch = logging.StreamHandler()
+        self.ch.setLevel(logging.INFO)
+        # create formatter and add it to the handlers
+        formatter = logging.Formatter('    %(name)s - %(levelname)s: - %(message)s')
+        self.ch.setFormatter(formatter)
+        # add the handlers to the logger
+        self.logger.addHandler(self.ch)
+
 
     def set_num_samples(self, num_samples):
+
         self.num_samples = num_samples
 
-    def compute_full_information_hyperparameters(self):
 
-        self.d_fi, self.k_fi, self.Sn_fi = self.nearest_neighbors_v(self.Y_data, self.X_data, verbose=False)
-        
-
-    def compute_training_model_hyperparameters(self):
+    @timed
+    def split_data(self):
 
         # Training data
         train_perm = sorted(random.sample(range(len(self.X_data)), self.num_samples))
@@ -35,35 +56,77 @@ class Nearest_neighbors_portfolio:
         self.X_val = self.X_data[val_perm]
         self.Y_val = self.Y_data[val_perm]
 
-        # Find an appropriate nn smoother using training data (learn the distance function itself, the number of nearest neighbours, and the type of smoother)
-        print("Getting hyperparameters for training NN model...")
-        self.d_tr, self.k_tr, self.Sn_tr = self.nearest_neighbors_v(self.Y_tr, self.X_tr, verbose=False)
+
+    @timed
+    def compute_full_information_hyperparameters(self):
+
+        self.d_fi, self.k_fi, self.Sn_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
 
 
     # can find analytically?
+    @timed
     def compute_full_information_oos_cost(self):
 
         fi_learner_oos_cost = 0
         for x_val in self.X_data:
-            c_fi, z_fi, b_fi, s_fi = self.portfolio_nn_nominal(self.Y_data, self.X_data, self.d_fi, self.k_fi, self.Sn_fi, x_val, verbose=False)
+            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.d_fi, self.k_fi, self.Sn_fi, x_val)
             fi_learner_oos_cost += c_fi
 
 
         return fi_learner_oos_cost/len(self.X_data)
+        
+
+    @timed
+    def compute_training_model_hyperparameters(self):
+
+        # Find an appropriate nn smoother using training data (learn the distance function itself, the number of nearest neighbours, and the type of smoother)
+        logging.info("Getting hyperparameters for training NN model...")
+        self.d_tr, self.k_tr, self.Sn_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
 
 
+    @timed
+    def compute_training_model_oos_cost(self):
+
+        tr_learner_oos_cost_true=0
+        logging.info("Performing out of sample test for both (full information and training) NN models with " \
+                     + str(len(self.X_val)) + " oos samples...")
+        for idx, x_val in enumerate(self.X_val):
+
+            if idx%10 == 0:
+                logging.debug("out: " + str(idx))
+
+            # oos cost of training learner (based on its knowledge of historical data) -- estimate
+            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.d_tr, self.k_tr, self.Sn_tr, x_val)
+
+            # find b (VaR) analytically
+            b=value_at_risk.value_at_risk(x_val, z_tr, self.epsilon)
+
+            # find true Y|X (returns Y distribution with weights)
+            training_loss_fnc = lambda y: self.loss(z_tr, b, y)
+            training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
+            c_tr_true = self.nearest_neighbors_learner(training_loss, self.X_data, x_val, self.d_fi, self.k_fi, self.Sn_fi)
+
+            tr_learner_oos_cost_true += c_tr_true
+
+        return tr_learner_oos_cost_true/len(self.X_val)
+
+
+    @timed
     def load_data_from_csv(self, x_csv_filename, y_csv_filename):
 
         self.X_data = np.loadtxt(x_csv_filename, delimiter=",")
         self.Y_data = np.loadtxt(y_csv_filename, delimiter=",")
 
 
+    @timed
     def loss(self, z, b, y):
     
-        return b + 1/self.epsilon*max(-np.dot(z, y)-b, 0)-self.lambda_*np.dot(z, y)
+        return b + 1/self.epsilon*max(-np.dot(z, y)-b, 0)-self.__lambda*np.dot(z, y)
 
 
-    def nearest_neighbors_v(self, Y, X, p=0.2, S_all=[smoother.Smoother("Naive")], verbose=False):
+    @timed
+    def compute_hyperparameters(self, Y, X, p=0.2, smoother_list=[smoother.Smoother("Naive")]):
+
 
         # num rows X -- ie num samples
         n = np.size(X, 0)
@@ -74,16 +137,13 @@ class Nearest_neighbors_portfolio:
         # num cols of Y -- ie num assets
         d_y = np.size(Y, 1)
 
-        if verbose:
-            print("# Start Nearest Neighbors Hyper Parameter Validation")
-            print("****************************************************")
-            print("## Problem Parameters")
-            print("1. Number of samples n = ", n)
-            print("2. Label dimension : ", d_y)
-            print("3. Covariate dimension : ", d_y)
-            print("## Hyperparameter optimization")
-            print("1. Proportion VALIDATION/TOTAL data =", p)
-            print("2. Considered Smoothers : ", S_all)
+        logging.debug("## Problem Parameters")
+        logging.debug("1. Number of samples n = " + str(n))
+        logging.debug("2. Label dimension : " + str(d_y))
+        logging.debug("3. Covariate dimension : " + str(d_y))
+        logging.debug("## Hyperparameter optimization")
+        logging.debug("1. Proportion VALIDATION/TOTAL data =" + str(p))
+        logging.debug("2. Considered Smoothers : " + str(smoother_list))
 
         # Compute covariance of covariates
 
@@ -99,7 +159,7 @@ class Nearest_neighbors_portfolio:
 
         # hyperparameters
 
-        # TODO: add this unused julia code in for NW portfolio?
+        # TODO: add this unused julia code for NW portfolio?
         #D = [d(X[i, :], mean_X) for i in range(0,n)]
 
         k_all = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
@@ -110,51 +170,41 @@ class Nearest_neighbors_portfolio:
         # the remaining 80% is your new "training" set
         train = sorted(list(set(range(n)) - set(val)))
 
-        if verbose:
-             print("Number of k to test: ", np.size(k_all,1))
+        logging.debug("Number of k to test: " + str(len(k_all)))
 
         val_errors_star = (-1, -1, -1)
-        # S is Smoother: see smoother.py
-        for S in S_all:
+        for __smoother in smoother_list:
             for k in k_all:
 
-                #h_all = logspace(log10(minimum(D)), log10(maximum(D)), 10)
-                if S == "Naive":
-                    h_all = [1]
+                # TODO: add this unused julia code for NW portfolio?
+                #bandwidth_list = logspace(log10(minimum(D)), log10(maximum(D)), 10)
+                if __smoother == "Naive":
+                    bandwidth_list = [1]
 
-                for hn in h_all:
+                for bandwidth in bandwidth_list:
 
-                    # Sn is "weighter": just a tuple containing these three variables
-                    Sn = weighter.Weighter(S, d, hn)
+                    __weighter = weighter.Weighter(__smoother, d, bandwidth)
 
-                    if verbose:
-                        print("*****VALIDATION*****")
-                        print("Smoother function : ", Sn)
-                        print("Number of neighbors : k = ", k)
+                    logging.debug("Smoother function : " + str(__weighter))
+                    logging.debug("Number of neighbors : k = " + str(k))
 
                     # find E[Y|X] ie best guess for Y given your that your learner is trained on this new smaller "training" set
-                    Yp = self.nearest_neighbors_learner(Y[train], X[train], X[val], d, k, Sn, verbose=False)
+                    Yp = self.nearest_neighbors_learner(Y[train], X[train], X[val], d, k, __weighter)
 
                     # compare the learner's best guess for Y to Y|X of the validation set
                     # ie find total distance between learner's Y|X and true Y|X -- store corresponding smoother and number of k
                     total_distance = np.sum((Y[val]-Yp)**2)
                     if total_distance < val_errors_star[0] or val_errors_star[0] == -1:
-                        val_errors_star = (total_distance, Sn, k)
+                        val_errors_star = (total_distance, __weighter, k)
 
         # notice that learning distance function only uses data
         # learning smoother (weigher) if not preset, and learning number of k-nearest points, use training data AND Y|X learner
 
-        if verbose:
-            print("********************************************************")
-            print("*** End Nearest Neighbors Hyper Parameter Validation ***")
-
-        #print(val_errors_star)
-        #print(d, val_errors_star[2], val_errors_star[1])
         return (d, val_errors_star[2], val_errors_star[1])
 
 
     """
-        nearest_neighbors_learner(Y, X, Xbar, d, k, Sn[, verbose] )
+        nearest_neighbors_learner(Y, X, Xbar, d, k, __weighter )
 
     # Arguments
 
@@ -163,14 +213,14 @@ class Nearest_neighbors_portfolio:
         3. `xbar` : Context of interest
         4. `d` : Distance metric
         5. `k` : Number of considered neighbors
-        6. `Sn` : Weighter function
-        7. `verbose` : Verbosity
+        6. `__weighter` : Weighter function
 
     # Returns
         1. `Yp` : Nearest neighbors prediction
 
     """
-    def nearest_neighbors_learner(self, Y, X, Xbar, d, k, Sn, verbose=False):
+    @timed
+    def nearest_neighbors_learner(self, Y, X, Xbar, d, k, __weighter):
 
         n = np.size(Y, 0)
 
@@ -184,16 +234,13 @@ class Nearest_neighbors_portfolio:
         else: # Xbar.dim == 1
             m = 1
 
-        if verbose:
-            print("# Start Nearest Neighbors Learning")
-            print("**********************************")
-            print("# Hyper Parameters")
-            print("1. Number of nearest neighbors k = ", k)
-            print("2. Smoother function S = ", Sn)
-            print("# Problem Parameters")
-            print("1. Number of samples n = ", n)
-            print("2. Label dimension : ", d_y)
-            print("3. Number of contexts : ", m)
+        logging.debug("# Hyper Parameters")
+        logging.debug("1. Number of nearest neighbors k = " + str(k))
+        logging.debug("2. Smoother function S = " + str(__weighter))
+        logging.debug("# Problem Parameters")
+        logging.debug("1. Number of samples n = " + str(n))
+        logging.debug("2. Label dimension : " + str(d_y))
+        logging.debug("3. Number of contexts : " + str(m))
 
         Yp = np.zeros((m, d_y))
         for j in range(m):
@@ -223,49 +270,40 @@ class Nearest_neighbors_portfolio:
             # Nk is an array of indices
             Nk = np.where(dist <= R_star)[0]
 
-            # note: Sn is a Weighter object
+            # note: __weighter is a Weighter object
 
             # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
-            weight_from_xbar = lambda x1: Sn(x1, xbar)
-            S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
-            #S = [weight_fcn(X[i], xbar) for i in Nk]
+            weight_from_xbar = lambda x1: __weighter(x1, xbar)
+            __smoother = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
+            #__smoother = [weight_fcn(X[i], xbar) for i in Nk]
 
             ## Prediction --> this is E[Y|X]!!!
             # Take the weighted average of all the Y[i,:] -- where i in nearest adjusted_k
 
-            #Y_nearestk_weighted = (S*Y[Nk].T).T
+            #Y_nearestk_weighted = (__smoother*Y[Nk].T).T
             #Yp[j] = mean(Y_nearestk_weighted, 0)
 
-            Yp[j] = np.mean((S*Y[Nk].T).T, 0)
-
-
-        if verbose:
-            print("**************************************")
-            print("*** End Nearest Neighbors Learning ***")
+            Yp[j] = np.mean((__smoother*Y[Nk].T).T, 0)
 
         return Yp
     
     
-    def portfolio_nn_nominal(self, Y, X, d, k, Sn, xbar, verbose=False):
-
-        #print("PORTFOLIO NN PYTHON START")
+    @timed
+    def optimize_nearest_neighbors_portfolio(self, Y, X, d, k, __weighter, xbar):
 
         n = np.size(Y, 0)
 
         d_y = np.size(Y, 1)
 
-        if verbose:
-            print("# Start Portfolio Nominal NN Formulation")
-            print("******************************************")
-            print("## Problem Parameters")
-            print("1. Risk level CVaR epsilon = ", self.epsilon)
-            print("2. Risk / Reward trade off lambda_ = ", self.lambda_)
-            print("## Problem dimensions ")
-            print("1. Number of samples n = ", n)
-            print("2. Label dimension : ", d_y)
-            print("## Hyper parameters")
-            print("1. Number of nearest neighbors k = ", k)
-            print("2. Weighter function Sn = ", Sn)
+        logging.debug("## Problem Parameters")
+        logging.debug("1. Risk level CVaR epsilon = " + str(self.epsilon))
+        logging.debug("2. Risk / Reward trade off __lambda = " + str(self.__lambda))
+        logging.debug("## Problem dimensions ")
+        logging.debug("1. Number of samples n = " + str(n))
+        logging.debug("2. Label dimension : " + str(d_y))
+        logging.debug("## Hyper parameters")
+        logging.debug("1. Number of nearest neighbors k = " + str(k))
+        logging.debug("2. Weighter function __weighter = " + str(__weighter))
 
         ## SORT the data based on distance to xbar        
         # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
@@ -290,11 +328,11 @@ class Nearest_neighbors_portfolio:
         b = cp.Variable(1)
 
         # Objective -- L is loss L(y,z) -- heavier weight to points closer to xbar
-        # ie with greater distance ie higher Sn
+        # ie with greater distance ie higher __weighter
         # since this is a minimization not clear why need to divide by the sum of all distances?
 
         # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
-        weight_from_xbar = lambda x1: Sn(x1, xbar)
+        weight_from_xbar = lambda x1: __weighter(x1, xbar)
 
         S = np.apply_along_axis(weight_from_xbar, 1, X_nn[Nk])
 
@@ -309,8 +347,8 @@ class Nearest_neighbors_portfolio:
         for i in Nk:
             # this must define the loss function L. Second part obvious
             # not sure why first part is the same?
-            constrs = constrs + [L[i] >= (1-1/self.epsilon)*b - (self.lambda_+1/self.epsilon)*sum(cp.multiply(Y_nn[i], z))]
-            constrs = constrs + [L[i] >= b - self.lambda_*sum(cp.multiply(Y_nn[i, :], z))]
+            constrs = constrs + [L[i] >= (1-1/self.epsilon)*b - (self.__lambda+1/self.epsilon)*sum(cp.multiply(Y_nn[i], z))]
+            constrs = constrs + [L[i] >= b - self.__lambda*sum(cp.multiply(Y_nn[i, :], z))]
 
         # find optimal z, VaR (b) -- which minimizes total cost
         # this minimum total cost (over hitorical points) is problem.optval
@@ -325,40 +363,4 @@ class Nearest_neighbors_portfolio:
         # look into warm start -- make sure it is leveraged!
         problem.solve(solver=cp.ECOS)
 
-        if verbose:
-            print("*** End Portfolio Nominal NN Formulation ***")
-            print("**********************************************")
-
         return (problem.value, z.value, b.value, problem.status)
-
-
-
-
-    def compute_training_model_oos_cost(self, verbose=False):
-
-        print("Testing training model (TM) vs full information model (FIM) for TM trained with ", self.num_samples)
-        print(" training samples...")
-
-        tr_learner_oos_cost_true=0
-        print("Performing out of sample test for both (full information and training) NN models with ", len(self.X_val), end='')
-        print(" oos samples...")
-        for x_val in self.X_val:
-
-            if verbose:
-                if i%10 == 0:
-                    print("out: ", i)
-
-            # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.portfolio_nn_nominal(self.Y_tr, self.X_tr, self.d_tr, self.k_tr, self.Sn_tr, x_val, verbose=False)
-
-            # find b (VaR) analytically
-            b=value_at_risk.value_at_risk(x_val, z_tr, self.epsilon)
-
-            # find true Y|X (returns Y distribution with weights)
-            training_loss_fnc = lambda y: self.loss(z_tr, b, y)
-            training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.nearest_neighbors_learner(training_loss, self.X_data, x_val, self.d_fi, self.k_fi, self.Sn_fi)
-
-            tr_learner_oos_cost_true += c_tr_true
-
-        return tr_learner_oos_cost_true/len(self.X_val)
