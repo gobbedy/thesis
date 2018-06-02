@@ -2,6 +2,7 @@ from functools import wraps
 from time import time
 from inspect import getouterframes, currentframe
 import logging
+from line_profiler import LineProfiler
 
 # credit: https://stackoverflow.com/a/27737385/8112889
 def timed(f):
@@ -32,19 +33,18 @@ def timed(f):
     return wrap
 
 
-'''
-# credits: https://gist.github.com/tkaemming/1997845, https://stackoverflow.com/a/27737385/8112889
-def timed(logger):
+def profile(f):
 
-    def decorator(f):
-        @wraps(f)
-        def wrap(*args, **kw):
-            ts = time()
-            result = f(*args, **kw)
-            te = time()
-            logger.info('End ' + f.__name__ + ': took %2.4f seconds.' % (te-ts))
-            return result
-        return wrap
+    @wraps(f)
+    def wrap(self, *args, **kw):
 
-    return decorator
-'''
+        # profile function and call it
+        lp = LineProfiler()
+        lp_wrapper = lp(f)
+        result = lp_wrapper(self, *args, **kw)
+        lp.print_stats()
+
+        # return function's result
+        return result
+    return wrap
+

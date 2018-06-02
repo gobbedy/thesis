@@ -8,7 +8,8 @@ import smoother
 import weighter
 import logging
 import sys
-from decorators import timed
+from decorators import timed, profile
+from numba import jit
 
 class Nearest_neighbors_portfolio:
 
@@ -104,7 +105,7 @@ class Nearest_neighbors_portfolio:
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.nearest_neighbors_learner(training_loss, self.X_data, x_val, self.d_fi, self.k_fi, self.Sn_fi)
+            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.d_fi, self.k_fi, self.Sn_fi)
 
             tr_learner_oos_cost_true += c_tr_true
 
@@ -123,10 +124,21 @@ class Nearest_neighbors_portfolio:
     
         return b + 1/self.epsilon*max(-np.dot(z, y)-b, 0)-self.__lambda*np.dot(z, y)
 
+#    @timed
+    def mahalanobis(self, x1, x2, A):
+        '''
+        sqrt( (x1-x2)inv(A)(x1-x2) )
+        '''
+
+        # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
+        (A, lower) = cho_factor(A, overwrite_a=True, check_finite=True)
+
+        # Distance function -- note that distance function -- smoother built on top
+        return np.sqrt((x1-x2) @ cho_solve((A, lower), x1-x2, overwrite_b=True, check_finite=True))
+
 
     @timed
     def compute_hyperparameters(self, Y, X, p=0.2, smoother_list=[smoother.Smoother("Naive")]):
-
 
         # num rows X -- ie num samples
         n = np.size(X, 0)
@@ -146,9 +158,7 @@ class Nearest_neighbors_portfolio:
         logging.debug("2. Considered Smoothers : " + str(smoother_list))
 
         # Compute covariance of covariates
-
-        # average of each column of X -- ie average value of each covariate
-        mean_X = np.mean(X, 0)
+        # TODO: check the math, why identity -- is this really mahalanobis?
         epsilonX = np.cov(X.T, bias=True) + np.identity(d_x)/n
 
         # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
@@ -156,6 +166,9 @@ class Nearest_neighbors_portfolio:
 
         # Distance function -- note that distance function -- smoother built on top
         d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
+
+        # distance function
+        #d = lambda x1, x2: self.mahalanobis(x1, x2, epsilonX)
 
         # hyperparameters
 
@@ -189,7 +202,7 @@ class Nearest_neighbors_portfolio:
                     logging.debug("Number of neighbors : k = " + str(k))
 
                     # find E[Y|X] ie best guess for Y given your that your learner is trained on this new smaller "training" set
-                    Yp = self.nearest_neighbors_learner(Y[train], X[train], X[val], d, k, __weighter)
+                    Yp = self.compute_expected_response(Y[train], X[train], X[val], d, k, __weighter)
 
                     # compare the learner's best guess for Y to Y|X of the validation set
                     # ie find total distance between learner's Y|X and true Y|X -- store corresponding smoother and number of k
@@ -204,7 +217,7 @@ class Nearest_neighbors_portfolio:
 
 
     """
-        nearest_neighbors_learner(Y, X, Xbar, d, k, __weighter )
+        compute_expected_response(Y, X, Xbar, d, k, __weighter )
 
     # Arguments
 
@@ -219,8 +232,14 @@ class Nearest_neighbors_portfolio:
         1. `Yp` : Nearest neighbors prediction
 
     """
+    # find E[Y|X]:
+    # 1. Find k nearest neighbors based on mahalanobis distance
+    # 2. Adjust k in case points just outside k-set have equal distance as kth point
+    # 3. Assign weights based on mahalanobis distance and a bandwidth
+    # 4. Apply smoother on top of these weights
     @timed
-    def nearest_neighbors_learner(self, Y, X, Xbar, d, k, __weighter):
+    @profile
+    def compute_expected_response(self, Y, X, Xbar, d, k, __weighter):
 
         n = np.size(Y, 0)
 
@@ -251,12 +270,21 @@ class Nearest_neighbors_portfolio:
                 xbar = Xbar[j]
             else: # Xbar.dim == 1
                 xbar = Xbar
+                
+            
+            dist = self.numba_test(d, X, xbar)
 
+            '''
             ## SORT the data based on distance to xbar
             # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
             dist_from_xbar = lambda x1: d(x1, xbar)
+
+
+            
+            # I AM HERE: try making this a separate function with a loop and jitting that function (yes, that simple -- who knows)
             dist = np.apply_along_axis(dist_from_xbar, 1, X)
             # dist = [d(X[i], xbar ) for i in range(n)]
+            '''
 
             perm = np.argsort(dist)
             dist = dist[perm]
@@ -274,19 +302,26 @@ class Nearest_neighbors_portfolio:
 
             # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
             weight_from_xbar = lambda x1: __weighter(x1, xbar)
-            __smoother = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
-            #__smoother = [weight_fcn(X[i], xbar) for i in Nk]
+            S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
+            #S = [weight_fcn(X[i], xbar) for i in Nk]
 
             ## Prediction --> this is E[Y|X]!!!
             # Take the weighted average of all the Y[i,:] -- where i in nearest adjusted_k
 
-            #Y_nearestk_weighted = (__smoother*Y[Nk].T).T
+            #Y_nearestk_weighted = (S*Y[Nk].T).T
             #Yp[j] = mean(Y_nearestk_weighted, 0)
 
-            Yp[j] = np.mean((__smoother*Y[Nk].T).T, 0)
+            # weighted average of all the Y[i,:] -- where i in nearest adjusted_k
+            Yp[j] = np.mean((S*Y[Nk].T).T, 0)
 
         return Yp
-    
+
+    @jit
+    def numba_test(self, d, X, xbar):
+        dist=np.empty(len(X))
+        for i in range(len(X)):
+            dist[i] = d(X[i], xbar)  
+        return dist
     
     @timed
     def optimize_nearest_neighbors_portfolio(self, Y, X, d, k, __weighter, xbar):
