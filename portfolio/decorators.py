@@ -25,6 +25,8 @@ def timed(f):
         te = time()
         
         # print end of function info
+        formatter = logging.Formatter(indent + '%(name)s - %(levelname)s: - %(message)s')
+        self.ch.setFormatter(formatter)
         self.logger.info('Finished ' + f.__name__ + ': took %2.4f seconds.' % (te-ts))
         self.logger.info('**************************************************')
         
@@ -38,7 +40,7 @@ def profile(f):
     @wraps(f)
     def wrap(self, *args, **kw):
 
-        # profile function and call it
+        # profile function and call function
         lp = LineProfiler()
         lp_wrapper = lp(f)
         result = lp_wrapper(self, *args, **kw)

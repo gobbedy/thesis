@@ -1,6 +1,6 @@
 import portfolio
 import logging
-import sys
+from decorators import timed, profile
 
 class Portfolio_simulator:
 
@@ -9,13 +9,31 @@ class Portfolio_simulator:
         self.name = name
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
+        self.configure_logger()
 
     def __str__(self):
-        return self.name        
+        return self.name
+
+    def configure_logger(self):
+        # create logger
+        self.logger = logging.getLogger(self.name)
+        self.logger.propagate = 0
+        # set "verbosity"
+        self.logger.setLevel(logging.INFO)
+        # create console handler
+        self.ch = logging.StreamHandler()
+        self.ch.setLevel(logging.INFO)
+        # create formatter and add it to the handlers
+        # just a placeholder -- will be updated on the fly by timed decorator
+        formatter = logging.Formatter('    %(name)s - %(levelname)s: - %(message)s')
+        self.ch.setFormatter(formatter)
+        # add the handlers to the logger
+        self.logger.addHandler(self.ch)
 
     def run_simulation(self):
 
-        epsilon=0.15
+        #epsilon=0.15
+        epsilon=0.05
         lambda_=0.0
         nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_)
         

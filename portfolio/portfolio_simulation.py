@@ -14,8 +14,6 @@ import portfolio_simulator
 # eg if INFO is set, all info and "worse" (warning, error, critical") messages will be printed
 # eg if ERROR is set, only ERROR and CRITICAL messages will be printed
 # note: use logging cookbook for more granularity: https://docs.python.org/2/howto/logging-cookbook.html
-#logging.basicConfig(level=logging.INFO)
-#logging.basicConfig(filename='test.log', level=logging.INFO)
 
 
 # configure logger

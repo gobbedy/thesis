@@ -7,7 +7,6 @@ import value_at_risk
 import smoother
 import weighter
 import logging
-import sys
 from decorators import timed, profile
 import torch
 
@@ -24,6 +23,7 @@ class Nearest_neighbors_portfolio:
         return self.name
 
     def configure_logger(self):
+
         # create logger
         self.logger = logging.getLogger(self.name)
         self.logger.propagate = 0
@@ -57,7 +57,6 @@ class Nearest_neighbors_portfolio:
         val_perm = sorted(list(set(range(len(self.X_data))) - set(train_perm)))
         self.X_val = self.X_data[val_perm]
         self.Y_val = self.Y_data[val_perm]
-
 
     @timed
     def compute_full_information_hyperparameters(self):
@@ -126,16 +125,17 @@ class Nearest_neighbors_portfolio:
         self.Y_data = np.loadtxt(y_csv_filename, delimiter=",")
 
 
-    @timed
+#    @timed
     def loss(self, z, b, y):
     
         return b + 1/self.epsilon*max(-np.dot(z, y)-b, 0)-self.__lambda*np.dot(z, y)
 
+    '''
 #    @timed
     def mahalanobis(self, x1, x2, A):
-        '''
+        \'''
         sqrt( (x1-x2)inv(A)(x1-x2) )
-        '''
+        \'''
 
         # Note: can get performance gain setting check_finite to false
         # Note2: what is returned is the lower left matrix despite lower=false, why?
@@ -143,7 +143,7 @@ class Nearest_neighbors_portfolio:
 
         # Distance function -- note that distance function -- smoother built on top
         return np.sqrt((x1-x2) @ cho_solve((A, lower), x1-x2, overwrite_b=True, check_finite=True))
-
+    '''
 
     @timed
     def compute_hyperparameters(self, Y, X, p=0.2, smoother_list=[smoother.Smoother("Naive")]):
@@ -178,7 +178,9 @@ class Nearest_neighbors_portfolio:
         # Distance function -- note that distance function -- smoother built on top
         
         ##d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
-        d = lambda x1, x2: torch.sqrt(torch.mm((x1-x2).view(1,len(x1)), torch.potrs((x1-x2).view(len(x1),1), upper_diag) ))
+        d = lambda x1, x2: torch.sqrt(torch.mm((x1-x2).transpose(0,1), torch.potrs((x1-x2), upper_diag) ))
+        ###def d(x1, x2):
+        ###    torch.sqrt(torch.mm((x1-x2).view(1,len(x1)), torch.potrs((x1-x2).view(len(x1),1), upper_diag) ))
 
         # distance function
         ##d = lambda x1, x2: self.mahalanobis(x1, x2, epsilonX)
@@ -252,7 +254,7 @@ class Nearest_neighbors_portfolio:
     # 3. Assign weights based on mahalanobis distance and a bandwidth
     # 4. Apply smoother on top of these weights
     @timed
-    @profile
+#    @profile
     def compute_expected_response(self, Y, X, Xbar, d, k, __weighter):
 
         n = np.size(Y, 0)
@@ -290,7 +292,7 @@ class Nearest_neighbors_portfolio:
             
             ## SORT the data based on distance to xbar
             # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-            dist_from_xbar = lambda x1: d(x1, xbar)
+            dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar.view(len(xbar),1))
 
             dist = np.empty(n)
             X_tensor=torch.from_numpy(X)
@@ -314,8 +316,11 @@ class Nearest_neighbors_portfolio:
             # note: __weighter is a Weighter object
 
             # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-            weight_from_xbar = lambda x1: __weighter(x1, xbar)
-            S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
+            weight_from_xbar = lambda x1: __weighter(x1.view(len(x1),1), xbar.view(len(xbar),1))
+            S = np.empty_like(Nk)
+            for i in Nk:
+                S[i] = weight_from_xbar(X_tensor[i])
+            ##S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
             #S = [weight_fcn(X[i], xbar) for i in Nk]
 
             ## Prediction --> this is E[Y|X]!!!
@@ -348,8 +353,15 @@ class Nearest_neighbors_portfolio:
 
         ## SORT the data based on distance to xbar        
         # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
-        dist_from_xbar = lambda x1: d(x1, xbar)
-        dist = np.apply_along_axis(dist_from_xbar, 1, X)
+        xbar_tensor=torch.from_numpy(xbar)
+        dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar_tensor.view(len(xbar_tensor),1))
+
+
+        X_tensor=torch.from_numpy(X)
+        dist = np.empty(n)
+        for i in range(n):
+            dist[i] = dist_from_xbar(X_tensor[i])
+        ##dist = np.apply_along_axis(dist_from_xbar, 1, X_tensor)
         #dist = [d(X[i], xbar ) for i in range(n)]
 
         perm = np.argsort(dist)
@@ -373,9 +385,13 @@ class Nearest_neighbors_portfolio:
         # since this is a minimization not clear why need to divide by the sum of all distances?
 
         # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
-        weight_from_xbar = lambda x1: __weighter(x1, xbar)
+        #weight_from_xbar = lambda x1: __weighter(x1, xbar)
+        #S = np.apply_along_axis(weight_from_xbar, 1, X_nn[Nk])
 
-        S = np.apply_along_axis(weight_from_xbar, 1, X_nn[Nk])
+        weight_from_xbar = lambda x1: __weighter(x1.view(len(x1),1), xbar_tensor.view(len(xbar_tensor),1))
+        S = np.empty_like(Nk)
+        for i in Nk:
+            S[i] = weight_from_xbar(X_tensor[i])
 
         # note: just "sum" instead of long sum_entries command appears to work
         obj = cp.Minimize(sum(cp.multiply(S,L))/sum(S))
