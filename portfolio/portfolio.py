@@ -9,6 +9,7 @@ import weighter
 import logging
 import sys
 from decorators import timed, profile
+import torch
 
 class Nearest_neighbors_portfolio:
 
@@ -32,6 +33,7 @@ class Nearest_neighbors_portfolio:
         self.ch = logging.StreamHandler()
         self.ch.setLevel(logging.INFO)
         # create formatter and add it to the handlers
+        # just a placeholder -- will be updated on the fly by timed decorator
         formatter = logging.Formatter('    %(name)s - %(levelname)s: - %(message)s')
         self.ch.setFormatter(formatter)
         # add the handlers to the logger
@@ -60,7 +62,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_full_information_hyperparameters(self):
 
-        self.d_fi, self.k_fi, self.Sn_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
+        self.d_fi, self.k_fi, self.weighter_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
 
 
     # can find analytically?
@@ -69,7 +71,8 @@ class Nearest_neighbors_portfolio:
 
         fi_learner_oos_cost = 0
         for x_val in self.X_data:
-            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.d_fi, self.k_fi, self.Sn_fi, x_val)
+            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.d_fi,
+                                                                               self.k_fi, self.weighter_fi, x_val)
             fi_learner_oos_cost += c_fi
 
 
@@ -79,9 +82,12 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_training_model_hyperparameters(self):
 
-        # Find an appropriate nn smoother using training data (learn the distance function itself, the number of nearest neighbours, and the type of smoother)
+        # Find an appropriate nn smoother using training data:
+        #     -- learn the distance function itself
+        #         -- from which we get weighter based on heuristically chosen bandwidth and smoother)
+        #     -- learn the number of nearest neighbours
         logging.info("Getting hyperparameters for training NN model...")
-        self.d_tr, self.k_tr, self.Sn_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
+        self.d_tr, self.k_tr, self.weighter_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
 
 
     @timed
@@ -96,7 +102,8 @@ class Nearest_neighbors_portfolio:
                 logging.debug("out: " + str(idx))
 
             # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.d_tr, self.k_tr, self.Sn_tr, x_val)
+            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.d_tr,
+                                                                               self.k_tr, self.weighter_tr, x_val)
 
             # find b (VaR) analytically
             b=value_at_risk.value_at_risk(x_val, z_tr, self.epsilon)
@@ -104,7 +111,8 @@ class Nearest_neighbors_portfolio:
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.d_fi, self.k_fi, self.Sn_fi)
+            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.d_fi, self.k_fi,
+                                                       self.weighter_fi)
 
             tr_learner_oos_cost_true += c_tr_true
 
@@ -129,7 +137,8 @@ class Nearest_neighbors_portfolio:
         sqrt( (x1-x2)inv(A)(x1-x2) )
         '''
 
-        # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
+        # Note: can get performance gain setting check_finite to false
+        # Note2: what is returned is the lower left matrix despite lower=false, why?
         (A, lower) = cho_factor(A, overwrite_a=True, check_finite=True)
 
         # Distance function -- note that distance function -- smoother built on top
@@ -160,14 +169,19 @@ class Nearest_neighbors_portfolio:
         # TODO: check the math, why identity -- is this really mahalanobis?
         epsilonX = np.cov(X.T, bias=True) + np.identity(d_x)/n
 
-        # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
-        (epsilonX, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
+        # Note: can get performance gain setting check_finite to false
+        # Note2: what is returned is the lower left matrix despite lower=false, why?
+        ##(epsilonX, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
+        upper_diag = torch.from_numpy(epsilonX)
+        torch.potrf(upper_diag, out=upper_diag)
 
         # Distance function -- note that distance function -- smoother built on top
-        d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
+        
+        ##d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
+        d = torch.sqrt(torch.mm(x1-x2, torch.potrs(upper_diag, x1-x2)))
 
         # distance function
-        #d = lambda x1, x2: self.mahalanobis(x1, x2, epsilonX)
+        ##d = lambda x1, x2: self.mahalanobis(x1, x2, epsilonX)
 
         # hyperparameters
 
@@ -184,7 +198,7 @@ class Nearest_neighbors_portfolio:
 
         logging.debug("Number of k to test: " + str(len(k_all)))
 
-        val_errors_star = (-1, -1, -1)
+        shortest_distance = -1
         for __smoother in smoother_list:
             for k in k_all:
 
@@ -200,19 +214,20 @@ class Nearest_neighbors_portfolio:
                     logging.debug("Smoother function : " + str(__weighter))
                     logging.debug("Number of neighbors : k = " + str(k))
 
-                    # find E[Y|X] ie best guess for Y given your that your learner is trained on this new smaller "training" set
+                    
+                    # find E[Y|xbar] for all X in validation set
                     Yp = self.compute_expected_response(Y[train], X[train], X[val], d, k, __weighter)
 
-                    # compare the learner's best guess for Y to Y|X of the validation set
-                    # ie find total distance between learner's Y|X and true Y|X -- store corresponding smoother and number of k
-                    total_distance = np.sum((Y[val]-Yp)**2)
-                    if total_distance < val_errors_star[0] or val_errors_star[0] == -1:
-                        val_errors_star = (total_distance, __weighter, k)
+                    # sum distance of all these E[Y|xbar] to true Y (respectively)
+                    model_distance = np.sum((Y[val]-Yp)**2)
 
-        # notice that learning distance function only uses data
-        # learning smoother (weigher) if not preset, and learning number of k-nearest points, use training data AND Y|X learner
+                    # the shortest such distance corresponds to most accurate model, ie 
+                    # this model has best weighter/k combination, so we store weighter/k
+                    if model_distance < shortest_distance or shortest_distance == -1:
+                        shortest_distance = model_distance
+                        hyperparameters = (k, __weighter)
 
-        return (d, val_errors_star[2], val_errors_star[1])
+        return (d, hyperparameters[0], hyperparameters[1])
 
 
     """
@@ -275,6 +290,7 @@ class Nearest_neighbors_portfolio:
             # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
             dist_from_xbar = lambda x1: d(x1, xbar)
 
+            # I AM HERE -- convert datatypes to torch tensors
             dist = np.apply_along_axis(dist_from_xbar, 1, X)
             # dist = [d(X[i], xbar ) for i in range(n)]
 
@@ -378,9 +394,9 @@ class Nearest_neighbors_portfolio:
         # TODO: run with default, see if it picks a faster one / compare speed of different solvers
         # note: more solvers can be added to core cvxpy
         # see "choosing a solver": http://www.cvxpy.org/tutorial/advanced/index.html 
-        # note that SCS can use GPUs! See https://github.com/cvxgrp/cvxpy/issues/245
+        # note that SCS can use GPUs -- See https://github.com/cvxgrp/cvxpy/issues/245
         # can Boyd's POGS solver be used?
-        # look into warm start -- make sure it is leveraged!
+        # look into warm start -- make sure it is leveraged
         problem.solve(solver=cp.ECOS)
 
         return (problem.value, z.value, b.value, problem.status)
