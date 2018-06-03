@@ -1,9 +1,6 @@
 import random
 import numpy as np
-import scipy.linalg
 from scipy.linalg import cho_factor, cho_solve
-from scipy.linalg.lapack import get_lapack_funcs
-import scipy.linalg.lapack
 from math import sqrt, floor, ceil
 import cvxpy as cp
 import value_at_risk
@@ -12,26 +9,6 @@ import weighter
 import logging
 import sys
 from decorators import timed, profile
-from numba import jit, njit, prange
-
-# I AM HERE: 1. get this working, 2. get parallelism working 3. get it working on gpu
-@njit(nopython=True, parallel=True)
-#@profile
-def numba_test(epsilonX, lower, X, xbar):
-    dist=np.empty(len(X))
-    for i in prange(len(X)):
-        #dist[i] = np.sqrt((X[i]-xbar) @ scipy.linalg.cho_solve((epsilonX, lower), X[i]-xbar, overwrite_b=True, check_finite=True))
-        
-        ##potrs, = scipy.linalg.lapack.get_lapack_funcs(('potrs',), (epsilonX, X[i]-xbar))
-        ##x, info = potrs(epsilonX, X[i]-xbar, lower=lower, overwrite_b=True)        
-        ##dist[i] = np.sqrt((X[i]-xbar) @ x)
-        
-        # note: inefficient: doesn't use the fact that it's triangular
-        # note2: epsilonX should be called L or lower
-        y = np.linalg.solve(epsilonX, X[i]-xbar)
-        x = np.linalg.solve(espsilonX.T.conj(), y)
-        dist[i] = np.sqrt((X[i]-xbar) @ x)
-        
 
 class Nearest_neighbors_portfolio:
 
@@ -83,16 +60,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_full_information_hyperparameters(self):
 
-        # Compute covariance of covariates
-        # TODO: check the math, why identity -- is this really mahalanobis?
-        epsilonX = np.cov(self.X_data.T, bias=True) + np.identity(np.size(self.X_data, 1))/np.size(self.X_data, 0)
-
-        # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
-        #(epsilonX, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
-        epsilonX = np.linalg.cholesky(epsilonX)
-        lower=True
-
-        self.d_fi, self.k_fi, self.Sn_fi = self.compute_hyperparameters(self.Y_data, self.X_data, epsilonX, lower)
+        self.d_fi, self.k_fi, self.Sn_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
 
 
     # can find analytically?
@@ -111,18 +79,9 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_training_model_hyperparameters(self):
 
-        # Compute covariance of covariates
-        # TODO: check the math, why identity -- is this really mahalanobis?
-        epsilonX_tr = np.cov(self.X_tr.T, bias=True) + np.identity(np.size(self.X_tr, 1))/np.size(self.X_tr, 0)
-
-        # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
-        #(epsilonX_tr, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
-        epsilonX = np.linalg.cholesky(epsilonX)
-        lower=True
-
         # Find an appropriate nn smoother using training data (learn the distance function itself, the number of nearest neighbours, and the type of smoother)
         logging.info("Getting hyperparameters for training NN model...")
-        self.d_tr, self.k_tr, self.Sn_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr, epsilonX_tr, lower)
+        self.d_tr, self.k_tr, self.Sn_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
 
 
     @timed
@@ -178,7 +137,7 @@ class Nearest_neighbors_portfolio:
 
 
     @timed
-    def compute_hyperparameters(self, Y, X, epsilonX, lower, p=0.2, smoother_list=[smoother.Smoother("Naive")]):
+    def compute_hyperparameters(self, Y, X, p=0.2, smoother_list=[smoother.Smoother("Naive")]):
 
         # num rows X -- ie num samples
         n = np.size(X, 0)
@@ -196,6 +155,13 @@ class Nearest_neighbors_portfolio:
         logging.debug("## Hyperparameter optimization")
         logging.debug("1. Proportion VALIDATION/TOTAL data =" + str(p))
         logging.debug("2. Considered Smoothers : " + str(smoother_list))
+
+        # Compute covariance of covariates
+        # TODO: check the math, why identity -- is this really mahalanobis?
+        epsilonX = np.cov(X.T, bias=True) + np.identity(d_x)/n
+
+        # Note: can get performance gain setting check_finite to false (what is returned is the lower left matrix despite lower=false, why?)
+        (epsilonX, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
 
         # Distance function -- note that distance function -- smoother built on top
         d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
@@ -235,7 +201,7 @@ class Nearest_neighbors_portfolio:
                     logging.debug("Number of neighbors : k = " + str(k))
 
                     # find E[Y|X] ie best guess for Y given your that your learner is trained on this new smaller "training" set
-                    Yp = self.compute_expected_response(Y[train], X[train], X[val], d, epsilonX, lower, k, __weighter)
+                    Yp = self.compute_expected_response(Y[train], X[train], X[val], d, k, __weighter)
 
                     # compare the learner's best guess for Y to Y|X of the validation set
                     # ie find total distance between learner's Y|X and true Y|X -- store corresponding smoother and number of k
@@ -271,8 +237,8 @@ class Nearest_neighbors_portfolio:
     # 3. Assign weights based on mahalanobis distance and a bandwidth
     # 4. Apply smoother on top of these weights
     @timed
-#    @profile
-    def compute_expected_response(self, Y, X, Xbar, d, epsilonX, lower, k, __weighter):
+    @profile
+    def compute_expected_response(self, Y, X, Xbar, d, k, __weighter):
 
         n = np.size(Y, 0)
 
@@ -305,19 +271,12 @@ class Nearest_neighbors_portfolio:
                 xbar = Xbar
                 
             
-            dist = numba_test(epsilonX, lower, X, xbar)
-
-            '''
             ## SORT the data based on distance to xbar
-            # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
+            # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
             dist_from_xbar = lambda x1: d(x1, xbar)
 
-
-            
-            # I AM HERE: try making this a separate function with a loop and jitting that function (yes, that simple -- who knows)
             dist = np.apply_along_axis(dist_from_xbar, 1, X)
             # dist = [d(X[i], xbar ) for i in range(n)]
-            '''
 
             perm = np.argsort(dist)
             dist = dist[perm]
@@ -333,7 +292,7 @@ class Nearest_neighbors_portfolio:
 
             # note: __weighter is a Weighter object
 
-            # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
+            # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
             weight_from_xbar = lambda x1: __weighter(x1, xbar)
             S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
             #S = [weight_fcn(X[i], xbar) for i in Nk]
@@ -348,18 +307,6 @@ class Nearest_neighbors_portfolio:
             Yp[j] = np.mean((S*Y[Nk].T).T, 0)
 
         return Yp
-
-    # I AM HERE: 1. get this working, 2. get parallelism working 3. get it working on gpu
-    @njit(parallel=True)
-    #@profile
-    def numba_test(epsilonX, lower, X, xbar):
-        dist=np.empty(len(X))
-        for i in prange(len(X)):
-            #dist[i] = np.sqrt((X[i]-xbar) @ scipy.linalg.cho_solve((epsilonX, lower), X[i]-xbar, overwrite_b=True, check_finite=True))
-            dist[i] = np.sqrt((X[i]-xbar) @ scipy.linalg.cho_solve((epsilonX, lower), X[i]-xbar))
-        
-        
-        return dist
     
     @timed
     def optimize_nearest_neighbors_portfolio(self, Y, X, d, k, __weighter, xbar):
