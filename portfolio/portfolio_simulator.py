@@ -32,8 +32,7 @@ class Portfolio_simulator:
 
     def run_simulation(self):
 
-        #epsilon=0.15
-        epsilon=0.05
+        epsilon=0.15
         lambda_=0.0
         nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_)
         
