@@ -178,7 +178,7 @@ class Nearest_neighbors_portfolio:
         # Distance function -- note that distance function -- smoother built on top
         
         ##d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
-        d = torch.sqrt(torch.mm(x1-x2, torch.potrs(upper_diag, x1-x2)))
+        d = lambda x1, x2: torch.sqrt(torch.mm((x1-x2).view(1,len(x1)), torch.potrs((x1-x2).view(len(x1),1), upper_diag) ))
 
         # distance function
         ##d = lambda x1, x2: self.mahalanobis(x1, x2, epsilonX)
@@ -275,23 +275,28 @@ class Nearest_neighbors_portfolio:
         logging.debug("2. Label dimension : " + str(d_y))
         logging.debug("3. Number of contexts : " + str(m))
 
+        Xbar_tensor=torch.from_numpy(Xbar)
+        
         Yp = np.zeros((m, d_y))
         for j in range(m):
 
             ## Context of interest
             # if I only input one observation, m=1 and xbar = Xbar
             if Xbar.ndim == 2:
-                xbar = Xbar[j]
+                xbar = Xbar_tensor[j]
             else: # Xbar.dim == 1
-                xbar = Xbar
+                xbar = Xbar_tensor
                 
             
             ## SORT the data based on distance to xbar
             # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
             dist_from_xbar = lambda x1: d(x1, xbar)
 
-            # I AM HERE -- convert datatypes to torch tensors
-            dist = np.apply_along_axis(dist_from_xbar, 1, X)
+            dist = np.empty(n)
+            X_tensor=torch.from_numpy(X)
+            for i in range(n):
+                dist[i] = dist_from_xbar(X_tensor[i])
+            ##dist = np.apply_along_axis(dist_from_xbar, 1, X)
             # dist = [d(X[i], xbar ) for i in range(n)]
 
             perm = np.argsort(dist)
