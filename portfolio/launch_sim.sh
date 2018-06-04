@@ -5,4 +5,4 @@
 #SBATCH --mem=8gb
 
 export PYTHONUNBUFFERED=1
-portfolio_simulation.py
+portfolio_simulation.py $@

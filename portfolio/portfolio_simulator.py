@@ -5,10 +5,12 @@ from decorators import timed, profile
 class Portfolio_simulator:
 
 
-    def __init__(self, name, num_iterations, num_samples_list):
+    def __init__(self, name, num_iterations, num_samples_list, deterministic=False, profile=False):
         self.name = name
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
+        self.deterministic = deterministic
+        self.profile = profile
         self.configure_logger()
 
     def __str__(self):
@@ -30,11 +32,12 @@ class Portfolio_simulator:
         # add the handlers to the logger
         self.logger.addHandler(self.ch)
 
+    @timed
     def run_simulation(self):
 
         epsilon=0.15
         lambda_=0.0
-        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_)
+        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.deterministic, self.profile)
         
         # load data
         # TODO: switch back to full data

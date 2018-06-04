@@ -15,6 +15,12 @@ import portfolio_simulator
 # eg if ERROR is set, only ERROR and CRITICAL messages will be printed
 # note: use logging cookbook for more granularity: https://docs.python.org/2/howto/logging-cookbook.html
 
+# parse arguments
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("-d", "--deterministic", help="make code deterministic for debugging", action="store_true")
+parser.add_argument("-p", "--profile", help="turn on advanced profiling", action="store_true")
+args = parser.parse_args()
 
 # configure logger
 logger = logging.getLogger('portfolio_simulation')
@@ -29,6 +35,7 @@ logger.addHandler(ch)
 logger.info("Start portfolio simulation")
 num_iterations=1
 num_samples_list=[8]
-simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list)
+simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.deterministic, args.profile)
 simulator.run_simulation()
 logger.info("End portfolio simulation")
+

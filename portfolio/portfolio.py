@@ -13,11 +13,13 @@ import torch
 class Nearest_neighbors_portfolio:
 
 
-    def __init__(self, name, epsilon, __lambda):
+    def __init__(self, name, epsilon, __lambda, deterministic=False, profile=False):
         self.name = name
         self.epsilon = epsilon
         self.__lambda = __lambda
         self.configure_logger()
+        self.deterministic=deterministic
+        self.profile=profile
 
     def __str__(self):
         return self.name
@@ -48,15 +50,27 @@ class Nearest_neighbors_portfolio:
     @timed
     def split_data(self):
 
-        # Training data
-        train_perm = sorted(random.sample(range(len(self.X_data)), self.num_samples))
-        self.X_tr = self.X_data[train_perm]
-        self.Y_tr = self.Y_data[train_perm]
+        if self.deterministic:
 
-        # Validation data
-        val_perm = sorted(list(set(range(len(self.X_data))) - set(train_perm)))
-        self.X_val = self.X_data[val_perm]
-        self.Y_val = self.Y_data[val_perm]
+            # train on first n samples; note: each row is a sample!
+            self.X_tr = self.X_data[0:self.num_samples]
+            self.Y_tr = self.Y_data[0:self.num_samples]
+
+            # all the non-training data is considered "validation" data -- but this is actually out of sample data! almost all the data is out of sample
+            self.X_val = self.X_data[self.num_samples:]
+            self.Y_val = self.Y_data[self.num_samples:]
+
+        else:
+        
+            # Training data
+            train_perm = sorted(random.sample(range(len(self.X_data)), self.num_samples))
+            self.X_tr = self.X_data[train_perm]
+            self.Y_tr = self.Y_data[train_perm]
+
+            # Validation data
+            val_perm = sorted(list(set(range(len(self.X_data))) - set(train_perm)))
+            self.X_val = self.X_data[val_perm]
+            self.Y_val = self.Y_data[val_perm]
 
     @timed
     def compute_full_information_hyperparameters(self):
@@ -193,7 +207,10 @@ class Nearest_neighbors_portfolio:
         k_all = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
 
         # pick 20% of the original (training) samples as your validation set -- note: sorting not necessary
-        val = sorted(random.sample(range(n), round(n*p)))
+        if self.deterministic:
+            val = range(round(n*p))
+        else:
+            val = sorted(random.sample(range(n), round(n*p)))
 
         # the remaining 80% is your new "training" set
         train = sorted(list(set(range(n)) - set(val)))
@@ -254,7 +271,7 @@ class Nearest_neighbors_portfolio:
     # 3. Assign weights based on mahalanobis distance and a bandwidth
     # 4. Apply smoother on top of these weights
     @timed
-#    @profile
+    @profile
     def compute_expected_response(self, Y, X, Xbar, d, k, __weighter):
 
         n = np.size(Y, 0)

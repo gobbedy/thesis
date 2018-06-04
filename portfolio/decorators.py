@@ -41,10 +41,13 @@ def profile(f):
     def wrap(self, *args, **kw):
 
         # profile function and call function
-        lp = LineProfiler()
-        lp_wrapper = lp(f)
-        result = lp_wrapper(self, *args, **kw)
-        lp.print_stats()
+        if self.profile:
+            lp = LineProfiler()
+            lp_wrapper = lp(f)
+            result = lp_wrapper(self, *args, **kw)
+            lp.print_stats()
+        else:
+            result = f(self, *args, **kw)
 
         # return function's result
         return result
