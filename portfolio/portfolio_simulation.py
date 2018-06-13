@@ -18,7 +18,7 @@ import portfolio_simulator
 # parse arguments
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("-d", "--deterministic", help="make code deterministic for debugging", action="store_true")
+parser.add_argument("-d", "--sanity", help="make code deterministic and use small existing dataset for debugging", action="store_true")
 parser.add_argument("-p", "--profile", help="turn on advanced profiling", action="store_true")
 args = parser.parse_args()
 
@@ -35,7 +35,7 @@ logger.addHandler(ch)
 logger.info("Start portfolio simulation")
 num_iterations=1
 num_samples_list=[8]
-simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.deterministic, args.profile)
+simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.sanity, args.profile, "data/X_nt.csv.short", "data/Y_nt.csv.short")
 simulator.run_simulation()
 logger.info("End portfolio simulation")
 

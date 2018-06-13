@@ -5,12 +5,14 @@ from decorators import timed, profile
 class Portfolio_simulator:
 
 
-    def __init__(self, name, num_iterations, num_samples_list, deterministic=False, profile=False):
+    def __init__(self, name, num_iterations, num_samples_list, sanity=False, profile=False, x_data_filename='', y_data_filename=''):
         self.name = name
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
-        self.deterministic = deterministic
+        self.sanity = sanity
         self.profile = profile
+        self.x_data_filename = x_data_filename
+        self.y_data_filename = y_data_filename
         self.configure_logger()
 
     def __str__(self):
@@ -37,12 +39,24 @@ class Portfolio_simulator:
 
         epsilon=0.15
         lambda_=0.0
-        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.deterministic, self.profile)
-        
+        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.sanity, self.profile)
+
+        #
+        if self.x_data_filename and not self.y_data_filename:
+            # TODO: convert to error
+            raise ValueError("X data filename has been set but not Y data filename")
+        elif self.y_data_filename and not self.x_data_filename:
+            raise ValueError("Y data filename has been set but not X data filename")
+
+
         # load data
         # TODO: switch back to full data
-        nn_portfolio.load_data_from_csv("data/X_nt.csv.short", "data/Y_nt.csv.short")
-
+        if self.sanity:
+            nn_portfolio.load_data_from_csv("data/X_nt.csv.sanity", "data/Y_nt.csv.sanity")
+        elif self.x_data_filename and self.y_data_filename:
+            nn_portfolio.load_data_from_csv(self.x_data_filename, self.y_data_filename)
+        else:
+            raise ValueError("ERROR: gen data not integrated yet")
 
         # NOTE: the next two lines are kept outside of the "num_iterations"
         # loop even though hyperparameter training is stochastic

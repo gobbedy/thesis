@@ -1,6 +1,8 @@
 *.bck
 *.out
 *.log
+.idea/
+__pycache__/
 tmp*
 test.sh
 

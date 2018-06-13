@@ -1,6 +1,5 @@
 import random
 import numpy as np
-from scipy.linalg import cho_factor, cho_solve
 from math import sqrt, floor, ceil
 import cvxpy as cp
 import value_at_risk
@@ -9,16 +8,22 @@ import weighter
 import logging
 from decorators import timed, profile
 import torch
+import platform
+# faiss not available on Windows
+if not platform.system() == "Windows":
+    import faiss
+
+from multiprocessing.dummy import Pool as ThreadPool 
 
 class Nearest_neighbors_portfolio:
 
 
-    def __init__(self, name, epsilon, __lambda, deterministic=False, profile=False):
+    def __init__(self, name, epsilon, __lambda, sanity=False, profile=False):
         self.name = name
         self.epsilon = epsilon
         self.__lambda = __lambda
         self.configure_logger()
-        self.deterministic=deterministic
+        self.sanity=sanity
         self.profile=profile
 
     def __str__(self):
@@ -50,7 +55,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def split_data(self):
 
-        if self.deterministic:
+        if self.sanity:
 
             # train on first n samples; note: each row is a sample!
             self.X_tr = self.X_data[0:self.num_samples]
@@ -75,7 +80,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_full_information_hyperparameters(self):
 
-        self.d_fi, self.k_fi, self.weighter_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
+        self.upper_diag_fi, self.k_fi, self.weighter_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
 
 
     # can find analytically?
@@ -84,7 +89,7 @@ class Nearest_neighbors_portfolio:
 
         fi_learner_oos_cost = 0
         for x_val in self.X_data:
-            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.d_fi,
+            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.upper_diag_fi,
                                                                                self.k_fi, self.weighter_fi, x_val)
             fi_learner_oos_cost += c_fi
 
@@ -100,7 +105,7 @@ class Nearest_neighbors_portfolio:
         #         -- from which we get weighter based on heuristically chosen bandwidth and smoother)
         #     -- learn the number of nearest neighbours
         logging.info("Getting hyperparameters for training NN model...")
-        self.d_tr, self.k_tr, self.weighter_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
+        self.upper_diag_tr, self.k_tr, self.weighter_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
 
 
     @timed
@@ -115,7 +120,7 @@ class Nearest_neighbors_portfolio:
                 logging.debug("out: " + str(idx))
 
             # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.d_tr,
+            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.upper_diag_tr,
                                                                                self.k_tr, self.weighter_tr, x_val)
 
             # find b (VaR) analytically
@@ -124,7 +129,7 @@ class Nearest_neighbors_portfolio:
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.d_fi, self.k_fi,
+            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.upper_diag_fi, self.k_fi,
                                                        self.weighter_fi)
 
             tr_learner_oos_cost_true += c_tr_true
@@ -207,7 +212,7 @@ class Nearest_neighbors_portfolio:
         k_all = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
 
         # pick 20% of the original (training) samples as your validation set -- note: sorting not necessary
-        if self.deterministic:
+        if self.sanity:
             val = range(round(n*p))
         else:
             val = sorted(random.sample(range(n), round(n*p)))
@@ -235,7 +240,7 @@ class Nearest_neighbors_portfolio:
 
                     
                     # find E[Y|xbar] for all X in validation set
-                    Yp = self.compute_expected_response(Y[train], X[train], X[val], d, k, __weighter)
+                    Yp = self.compute_expected_response(Y[train], X[train], X[val], upper_diag, k, __weighter)
 
                     # sum distance of all these E[Y|xbar] to true Y (respectively)
                     model_distance = np.sum((Y[val]-Yp)**2)
@@ -246,7 +251,7 @@ class Nearest_neighbors_portfolio:
                         shortest_distance = model_distance
                         hyperparameters = (k, __weighter)
 
-        return (d, hyperparameters[0], hyperparameters[1])
+        return (upper_diag, hyperparameters[0], hyperparameters[1])
 
 
     """
@@ -272,7 +277,7 @@ class Nearest_neighbors_portfolio:
     # 4. Apply smoother on top of these weights
     @timed
     @profile
-    def compute_expected_response(self, Y, X, Xbar, d, k, __weighter):
+    def compute_expected_response(self, Y, X, Xbar, upper_diag, k, __weighter):
 
         n = np.size(Y, 0)
 
@@ -295,64 +300,121 @@ class Nearest_neighbors_portfolio:
         logging.debug("3. Number of contexts : " + str(m))
 
         Xbar_tensor=torch.from_numpy(Xbar)
-        
+        X_tensor = torch.from_numpy(X)
+        Y_tensor = torch.from_numpy(Y)
+
         Yp = np.zeros((m, d_y))
-        for j in range(m):
 
-            ## Context of interest
-            # if I only input one observation, m=1 and xbar = Xbar
-            if Xbar.ndim == 2:
-                xbar = Xbar_tensor[j]
-            else: # Xbar.dim == 1
-                xbar = Xbar_tensor
-                
-            
-            ## SORT the data based on distance to xbar
-            # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-            dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar.view(len(xbar),1))
+        if platform.system() == "UNUSED":
+        #if not platform.system() == "Windows":
+            # note: this does not use "expanded" k
+            index = faiss.IndexFlatL2(X_tensor.size(1))
+            index.add(X)
+            distances, nearest_neighbor_index_matrix = index.search(Xbar, k)
+            for idx, nearest_neighbor_index_array in enumerate(nearest_neighbor_index_matrix):
+                S = np.empty_like(nearest_neighbor_index_array)
+                for jdx, nearest_neighbor_index in enumerate(nearest_neighbor_index_array):
+                    S[jdx] = weight_from_xbar(distances[idx, jdx])
+                Yp[idx] = np.mean((S * Y_tensor[nearest_neighbor_index_array].numpy().T).T, 0)
 
-            dist = np.empty(n)
-            X_tensor=torch.from_numpy(X)
-            for i in range(n):
-                dist[i] = dist_from_xbar(X_tensor[i])
-            ##dist = np.apply_along_axis(dist_from_xbar, 1, X)
-            # dist = [d(X[i], xbar ) for i in range(n)]
+        else:
 
-            perm = np.argsort(dist)
-            dist = dist[perm]
-            Y = Y[perm] # now local scope
-            X = X[perm] # now local scope
+            for j in range(m):
 
-            ## Define set of points of interest
-            R_star = dist[k-1]+1e-7
+                ## Context of interest
+                # if I only input one observation, m=1 and xbar = Xbar
+                if Xbar.ndim == 2:
+                    xbar = Xbar_tensor[j]
+                else: # Xbar.dim == 1
+                    xbar = Xbar_tensor
 
-            # adjusted k to avoid eliminating equi-distant points
-            # Nk is an array of indices
-            Nk = np.where(dist <= R_star)[0]
 
-            # note: __weighter is a Weighter object
+                ## SORT the data based on distance to xbar
+                # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
+                dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar.view(len(xbar),1))
 
-            # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-            weight_from_xbar = lambda x1: __weighter(x1.view(len(x1),1), xbar.view(len(xbar),1))
-            S = np.empty_like(Nk)
-            for i in Nk:
-                S[i] = weight_from_xbar(X_tensor[i])
-            ##S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
-            #S = [weight_fcn(X[i], xbar) for i in Nk]
 
-            ## Prediction --> this is E[Y|X]!!!
-            # Take the weighted average of all the Y[i,:] -- where i in nearest adjusted_k
 
-            #Y_nearestk_weighted = (S*Y[Nk].T).T
-            #Yp[j] = mean(Y_nearestk_weighted, 0)
+                ##pool = ThreadPool(16)
+                ##dist = np.array(pool.map(dist_from_xbar, X_tensor))
+                ##pool.close()
+                ##pool.join()
 
-            # weighted average of all the Y[i,:] -- where i in nearest adjusted_k
-            Yp[j] = np.mean((S*Y[Nk].T).T, 0)
+                # x1 - x2
+                Xsub = X_tensor - xbar
+                Z=torch.empty(X_tensor.size())
+                for i in range(n):
+                    # z = Linv * (x - xbar), where L is lower diagonal matrix
+                    Z[i]=torch.trtrs(Xsub[i], upper_diag.transpose(0,1), upper=False)[0].transpose(0,1)
+
+
+                # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
+                # but since speed is not the objective here, this is fine
+                #dist = torch.norm(X_tensor)
+                dist = torch.norm(Z, p=2, dim=1)
+
+
+                ###dist = np.empty(n)
+                ###X_tensor=torch.from_numpy(X)
+                ###for i in range(n):
+                ###    dist[i] = dist_from_xbar(X_tensor[i])
+
+                ##dist = np.apply_along_axis(dist_from_xbar, 1, X)
+                # dist = [d(X[i], xbar ) for i in range(n)]
+
+                dist, perm = torch.sort(dist, 0)
+                Y_tensor = Y_tensor[perm] # now local scope
+                X_tensor = X_tensor[perm] # now local scope
+
+
+                ###perm = np.argsort(dist)
+                ###dist = dist[perm]
+                ###Y = Y[perm] # now local scope
+                ###X = X[perm] # now local scope
+
+                # Define set of points of interest
+                R_star = dist[k-1]+1e-7
+
+                # adjusted k to avoid eliminating equi-distant points
+                # Nk is an array of indices
+                ###Nk = np.where(dist <= R_star)[0]
+                Nk = torch.nonzero(dist <= R_star).squeeze().numpy()
+                # note: __weighter is a Weighter object
+
+
+                # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
+                weight_from_xbar = lambda x1: __weighter.smoother(x1 / __weighter.bandwidth)
+                #self.smoother(self.distance(x1, x2) / self.bandwidth)
+                if Nk.ndim > 0:
+                    S = np.empty_like(Nk)
+                    for i in Nk:
+                        S[i] = weight_from_xbar(dist[i])
+                # handle case where Nk is scalar ("0-d array" technically)
+                else:
+                    S = weight_from_xbar(dist[Nk])
+                ##S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
+                #S = [weight_fcn(X[i], xbar) for i in Nk]
+
+                ## Prediction --> this is E[Y|X]!!!
+                # Take the weighted average of all the Y[i,:] -- where i in nearest adjusted_k
+
+                #Y_nearestk_weighted = (S*Y[Nk].T).T
+                #Yp[j] = mean(Y_nearestk_weighted, 0)
+
+                # weighted average of all the Y[i,:] -- where i in nearest adjusted_k
+                #print(Y_tensor.shape)
+                #print(Nk.shape)
+                #print(Y_tensor[Nk].shape)
+                #print(Y_tensor[Nk].numpy().shape)
+                Yp[j] = np.mean((S * Y_tensor[Nk].numpy().T).T, 0)
+                #Yp[j] = np.mean((S * Y_tensor[Nk].transpose(0,1)).transpose(0,1), 0)
+                #Yp[j] = np.mean((S * Y[Nk].T).T, 0)
+
 
         return Yp
     
-    @timed
-    def optimize_nearest_neighbors_portfolio(self, Y, X, d, k, __weighter, xbar):
+#    @timed
+    def optimize_nearest_neighbors_portfolio(self, Y, X, upper_diag, k, __weighter, xbar):
 
         n = np.size(Y, 0)
 
@@ -369,46 +431,62 @@ class Nearest_neighbors_portfolio:
         logging.debug("2. Weighter function __weighter = " + str(__weighter))
 
         ## SORT the data based on distance to xbar        
-        # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
-        xbar_tensor=torch.from_numpy(xbar)
-        dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar_tensor.view(len(xbar_tensor),1))
 
+        ## Context of interest
+        # if I only input one observation, m=1 and xbar = Xbar
+        xbar_tensor = torch.from_numpy(xbar)
 
-        X_tensor=torch.from_numpy(X)
-        dist = np.empty(n)
+        X_tensor = torch.from_numpy(X)
+        Y_tensor = torch.from_numpy(Y)
+        ##pool = ThreadPool(16)
+        ##dist = np.array(pool.map(dist_from_xbar, X_tensor))
+        ##pool.close()
+        ##pool.join()
+
+        # x1 - x2
+        Xsub = X_tensor - xbar_tensor
+        Z = torch.empty(X_tensor.size())
         for i in range(n):
-            dist[i] = dist_from_xbar(X_tensor[i])
-        ##dist = np.apply_along_axis(dist_from_xbar, 1, X_tensor)
-        #dist = [d(X[i], xbar ) for i in range(n)]
+            # z = Linv * (x - xbar), where L is lower diagonal matrix
+            Z[i] = torch.trtrs(Xsub[i], upper_diag.transpose(0, 1), upper=False)[0].transpose(0, 1)
 
-        perm = np.argsort(dist)
-        dist = dist[perm]
-        Y_nn = Y[perm]
-        X_nn = X[perm]
+        # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
+        # but since speed is not the objective here, this is fine
+        # dist = torch.norm(X_tensor)
+        dist = torch.norm(Z, p=2, dim=1)
 
-        # rather than do k nearest neighbors, also include any points
-        # that are basically equal to the kth point (or within 1e-7)
-        # this avoids making the threshold arbitrarily cut off equal points
-        R_star = dist[k-1]+1e-7
-        Nk = np.where(dist <= R_star)[0]
+        dist, perm = torch.sort(dist, 0)
+        Y_nn = Y_tensor[perm].numpy() # now local scope
+        X_nn = X_tensor[perm].numpy()  # now local scope
 
-        # OPTIMIZATION FORMULATION
-        z = cp.Variable(d_y)
-        L = cp.Variable(len(Nk))
-        b = cp.Variable(1)
+        # Define set of points of interest
+        R_star = dist[k - 1] + 1e-7
+
+        # adjusted k to avoid eliminating equi-distant points
+        # Nk is an array of indices
+        ###Nk = np.where(dist <= R_star)[0]
+        Nk = torch.nonzero(dist <= R_star).squeeze().numpy()
+        # note: __weighter is a Weighter object
+
+        # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
+        weight_from_xbar = lambda x1: __weighter.smoother(x1 / __weighter.bandwidth)
+        # self.smoother(self.distance(x1, x2) / self.bandwidth)
+        if Nk.ndim > 0:
+            S = np.empty_like(Nk)
+            for i in Nk:
+                S[i] = weight_from_xbar(dist[i])
+        # handle case where Nk is scalar ("0-d array" technically)
+        else:
+            S = weight_from_xbar(dist[Nk])
 
         # Objective -- L is loss L(y,z) -- heavier weight to points closer to xbar
         # ie with greater distance ie higher __weighter
         # since this is a minimization not clear why need to divide by the sum of all distances?
 
-        # TODO: apply_along_axis is NOT fast -- use numba (perhaps with original loop) for speedup
-        #weight_from_xbar = lambda x1: __weighter(x1, xbar)
-        #S = np.apply_along_axis(weight_from_xbar, 1, X_nn[Nk])
-
-        weight_from_xbar = lambda x1: __weighter(x1.view(len(x1),1), xbar_tensor.view(len(xbar_tensor),1))
-        S = np.empty_like(Nk)
-        for i in Nk:
-            S[i] = weight_from_xbar(X_tensor[i])
+        # OPTIMIZATION FORMULATION
+        z = cp.Variable(d_y)
+        L = cp.Variable(len(Nk))
+        b = cp.Variable(1)
 
         # note: just "sum" instead of long sum_entries command appears to work
         obj = cp.Minimize(sum(cp.multiply(S,L))/sum(S))
