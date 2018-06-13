@@ -1,14 +1,14 @@
 class Weighter:
 
-    def __init__(self, smoother, distance, bandwidth):
+    def __init__(self, smoother, upper_diag, bandwidth):
         
         self.smoother = smoother
-        self.distance = distance
+        self.upper_diag = upper_diag
         self.bandwidth = bandwidth
 
         # see smoother.py for explanation of these lines
         self.__class__ = type(self.__class__.__name__, (self.__class__,), {})
-        self.__class__.__call__ = self.weighter_fcn
+        #self.__class__.__call__ = self.weighter_fcn
 
     # see smoother.py for explanation of these lines
     def __str__(self):
@@ -18,5 +18,5 @@ class Weighter:
     def __eq__(self, other): 
         return self.__dict__ == other.__dict__
 
-    def weighter_fcn(self, x1, x2):
-        return self.smoother(self.distance(x1, x2)/self.bandwidth)
+    #def weighter_fcn(self, x1, x2):
+    #    return self.smoother(self.distance(x1, x2)/self.bandwidth)

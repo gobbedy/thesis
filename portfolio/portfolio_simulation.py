@@ -1,6 +1,8 @@
 #!/usr/bin/env python3.6
+import time
 import logging
 import portfolio_simulator
+import torch
 
 # note: levels are:
 # CRITICAL
@@ -14,6 +16,12 @@ import portfolio_simulator
 # eg if INFO is set, all info and "worse" (warning, error, critical") messages will be printed
 # eg if ERROR is set, only ERROR and CRITICAL messages will be printed
 # note: use logging cookbook for more granularity: https://docs.python.org/2/howto/logging-cookbook.html
+
+
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
 
 # parse arguments
 import argparse
@@ -32,10 +40,12 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 # launch simulation
+logger.info(time.ctime())
 logger.info("Start portfolio simulation")
 num_iterations=1
 num_samples_list=[8]
-simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.sanity, args.profile, "data/X_nt.csv.short", "data/Y_nt.csv.short")
+simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.sanity, args.profile, "data/X_nt.csv.short", "data/Y_nt.csv.short", device)
 simulator.run_simulation()
 logger.info("End portfolio simulation")
+logger.info(time.ctime())
 

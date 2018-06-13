@@ -9,22 +9,21 @@ import logging
 from decorators import timed, profile
 import torch
 import platform
-# faiss not available on Windows
-if not platform.system() == "Windows":
-    import faiss
 
 from multiprocessing.dummy import Pool as ThreadPool 
+
 
 class Nearest_neighbors_portfolio:
 
 
-    def __init__(self, name, epsilon, __lambda, sanity=False, profile=False):
+    def __init__(self, name, epsilon, __lambda, sanity=False, profile=False, device=torch.device('cpu')):
         self.name = name
         self.epsilon = epsilon
         self.__lambda = __lambda
         self.configure_logger()
         self.sanity=sanity
         self.profile=profile
+        self.device=device
 
     def __str__(self):
         return self.name
@@ -80,7 +79,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_full_information_hyperparameters(self):
 
-        self.upper_diag_fi, self.k_fi, self.weighter_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
+        self.k_fi, self.weighter_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
 
 
     # can find analytically?
@@ -89,7 +88,7 @@ class Nearest_neighbors_portfolio:
 
         fi_learner_oos_cost = 0
         for x_val in self.X_data:
-            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.upper_diag_fi,
+            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data,
                                                                                self.k_fi, self.weighter_fi, x_val)
             fi_learner_oos_cost += c_fi
 
@@ -105,7 +104,7 @@ class Nearest_neighbors_portfolio:
         #         -- from which we get weighter based on heuristically chosen bandwidth and smoother)
         #     -- learn the number of nearest neighbours
         logging.info("Getting hyperparameters for training NN model...")
-        self.upper_diag_tr, self.k_tr, self.weighter_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
+        self.k_tr, self.weighter_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
 
 
     @timed
@@ -120,7 +119,7 @@ class Nearest_neighbors_portfolio:
                 logging.debug("out: " + str(idx))
 
             # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.upper_diag_tr,
+            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr,
                                                                                self.k_tr, self.weighter_tr, x_val)
 
             # find b (VaR) analytically
@@ -129,7 +128,7 @@ class Nearest_neighbors_portfolio:
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.upper_diag_fi, self.k_fi,
+            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.k_fi,
                                                        self.weighter_fi)
 
             tr_learner_oos_cost_true += c_tr_true
@@ -197,7 +196,7 @@ class Nearest_neighbors_portfolio:
         # Distance function -- note that distance function -- smoother built on top
         
         ##d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
-        d = lambda x1, x2: torch.sqrt(torch.mm((x1-x2).transpose(0,1), torch.potrs((x1-x2), upper_diag) ))
+        ###d = lambda x1, x2: torch.sqrt(torch.mm((x1-x2).transpose(0,1), torch.potrs((x1-x2), upper_diag) ))
         ###def d(x1, x2):
         ###    torch.sqrt(torch.mm((x1-x2).view(1,len(x1)), torch.potrs((x1-x2).view(len(x1),1), upper_diag) ))
 
@@ -209,7 +208,7 @@ class Nearest_neighbors_portfolio:
         # TODO: add this unused julia code for NW portfolio?
         #D = [d(X[i, :], mean_X) for i in range(0,n)]
 
-        k_all = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
+        k_list = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
 
         # pick 20% of the original (training) samples as your validation set -- note: sorting not necessary
         if self.sanity:
@@ -220,42 +219,51 @@ class Nearest_neighbors_portfolio:
         # the remaining 80% is your new "training" set
         train = sorted(list(set(range(n)) - set(val)))
 
-        logging.debug("Number of k to test: " + str(len(k_all)))
+        logging.debug("Number of k to test: " + str(len(k_list)))
 
         shortest_distance = -1
         for __smoother in smoother_list:
-            for k in k_all:
 
-                # TODO: add this unused julia code for NW portfolio?
-                #bandwidth_list = logspace(log10(minimum(D)), log10(maximum(D)), 10)
-                if __smoother == "Naive":
-                    bandwidth_list = [1]
+            # TODO: add this unused julia code for NW portfolio?
+            #bandwidth_list = logspace(log10(minimum(D)), log10(maximum(D)), 10)
+            if __smoother == "Naive":
+                bandwidth_list = [1]
 
-                for bandwidth in bandwidth_list:
+            for bandwidth in bandwidth_list:
 
-                    __weighter = weighter.Weighter(__smoother, d, bandwidth)
+                hyperparameter_object = weighter.Weighter(__smoother, bandwidth)
 
-                    logging.debug("Smoother function : " + str(__weighter))
+                compute_expected_response_current_training_set = lambda x1: self.compute_expected_response(Y[train], X[train], X[val], x1, hyperparameter_object)
+
+                pool = ThreadPool(16)
+                Yp_dist = np.array(pool.map(compute_expected_response_current_training_set, k_list))
+                type(Yp_dist)
+                exit()
+                pool.close()
+                pool.join()
+
+                for k in k_list:
+
+                    logging.debug("Smoother function : " + str(hyperparameter_object))
                     logging.debug("Number of neighbors : k = " + str(k))
 
-                    
                     # find E[Y|xbar] for all X in validation set
-                    Yp = self.compute_expected_response(Y[train], X[train], X[val], upper_diag, k, __weighter)
+                    Yp = self.compute_expected_response(Y[train], X[train], X[val], k, hyperparameter_object)
 
                     # sum distance of all these E[Y|xbar] to true Y (respectively)
                     model_distance = np.sum((Y[val]-Yp)**2)
 
-                    # the shortest such distance corresponds to most accurate model, ie 
+                    # the shortest such distance corresponds to most accurate model, ie
                     # this model has best weighter/k combination, so we store weighter/k
                     if model_distance < shortest_distance or shortest_distance == -1:
                         shortest_distance = model_distance
-                        hyperparameters = (k, __weighter)
+                        hyperparameters = (k, hyperparameter_object)
 
-        return (upper_diag, hyperparameters[0], hyperparameters[1])
+        return hyperparameters
 
 
     """
-        compute_expected_response(Y, X, Xbar, d, k, __weighter )
+        compute_expected_response(Y, X, Xbar, k, hyperparameter_object )
 
     # Arguments
 
@@ -264,7 +272,7 @@ class Nearest_neighbors_portfolio:
         3. `xbar` : Context of interest
         4. `d` : Distance metric
         5. `k` : Number of considered neighbors
-        6. `__weighter` : Weighter function
+        6. `hyperparameter_object` : Hyperparameter object
 
     # Returns
         1. `Yp` : Nearest neighbors prediction
@@ -277,7 +285,7 @@ class Nearest_neighbors_portfolio:
     # 4. Apply smoother on top of these weights
     @timed
     @profile
-    def compute_expected_response(self, Y, X, Xbar, upper_diag, k, __weighter):
+    def compute_expected_response(self, Y, X, Xbar, k, hyperparameter_object):
 
         n = np.size(Y, 0)
 
@@ -293,7 +301,7 @@ class Nearest_neighbors_portfolio:
 
         logging.debug("# Hyper Parameters")
         logging.debug("1. Number of nearest neighbors k = " + str(k))
-        logging.debug("2. Smoother function S = " + str(__weighter))
+        logging.debug("2. Smoother function S = " + str(hyperparameter_object))
         logging.debug("# Problem Parameters")
         logging.debug("1. Number of samples n = " + str(n))
         logging.debug("2. Label dimension : " + str(d_y))
@@ -331,7 +339,7 @@ class Nearest_neighbors_portfolio:
 
                 ## SORT the data based on distance to xbar
                 # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-                dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar.view(len(xbar),1))
+                ###dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar.view(len(xbar),1))
 
 
 
@@ -342,10 +350,10 @@ class Nearest_neighbors_portfolio:
 
                 # x1 - x2
                 Xsub = X_tensor - xbar
-                Z=torch.empty(X_tensor.size())
+                Z=torch.empty(X_tensor.size(), device=self.device)
                 for i in range(n):
                     # z = Linv * (x - xbar), where L is lower diagonal matrix
-                    Z[i]=torch.trtrs(Xsub[i], upper_diag.transpose(0,1), upper=False)[0].transpose(0,1)
+                    Z[i]=torch.trtrs(Xsub[i], hyperparameter_object.upper_diag.transpose(0,1), upper=False)[0].transpose(0,1)
 
 
                 # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
@@ -378,12 +386,11 @@ class Nearest_neighbors_portfolio:
                 # adjusted k to avoid eliminating equi-distant points
                 # Nk is an array of indices
                 ###Nk = np.where(dist <= R_star)[0]
-                Nk = torch.nonzero(dist <= R_star).squeeze().numpy()
-                # note: __weighter is a Weighter object
+                Nk = torch.nonzero(dist <= R_star).cpu().squeeze().numpy()
 
 
                 # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-                weight_from_xbar = lambda x1: __weighter.smoother(x1 / __weighter.bandwidth)
+                weight_from_xbar = lambda x1: hyperparameter_object.smoother(x1 / hyperparameter_object.bandwidth)
                 #self.smoother(self.distance(x1, x2) / self.bandwidth)
                 if Nk.ndim > 0:
                     S = np.empty_like(Nk)
@@ -414,7 +421,7 @@ class Nearest_neighbors_portfolio:
         return Yp
     
 #    @timed
-    def optimize_nearest_neighbors_portfolio(self, Y, X, upper_diag, k, __weighter, xbar):
+    def optimize_nearest_neighbors_portfolio(self, Y, X, k, hyperparameter_object, xbar):
 
         n = np.size(Y, 0)
 
@@ -428,7 +435,7 @@ class Nearest_neighbors_portfolio:
         logging.debug("2. Label dimension : " + str(d_y))
         logging.debug("## Hyper parameters")
         logging.debug("1. Number of nearest neighbors k = " + str(k))
-        logging.debug("2. Weighter function __weighter = " + str(__weighter))
+        logging.debug("2. Hyperparameter object hyperparameter_object = " + str(hyperparameter_object))
 
         ## SORT the data based on distance to xbar        
 
@@ -448,7 +455,7 @@ class Nearest_neighbors_portfolio:
         Z = torch.empty(X_tensor.size())
         for i in range(n):
             # z = Linv * (x - xbar), where L is lower diagonal matrix
-            Z[i] = torch.trtrs(Xsub[i], upper_diag.transpose(0, 1), upper=False)[0].transpose(0, 1)
+            Z[i] = torch.trtrs(Xsub[i], hyperparameter_object.upper_diag.transpose(0, 1), upper=False)[0].transpose(0, 1)
 
         # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
         # but since speed is not the objective here, this is fine
@@ -466,10 +473,9 @@ class Nearest_neighbors_portfolio:
         # Nk is an array of indices
         ###Nk = np.where(dist <= R_star)[0]
         Nk = torch.nonzero(dist <= R_star).squeeze().numpy()
-        # note: __weighter is a Weighter object
 
         # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-        weight_from_xbar = lambda x1: __weighter.smoother(x1 / __weighter.bandwidth)
+        weight_from_xbar = lambda x1: hyperparameter_object.smoother(x1 / hyperparameter_object.bandwidth)
         # self.smoother(self.distance(x1, x2) / self.bandwidth)
         if Nk.ndim > 0:
             S = np.empty_like(Nk)
@@ -480,7 +486,7 @@ class Nearest_neighbors_portfolio:
             S = weight_from_xbar(dist[Nk])
 
         # Objective -- L is loss L(y,z) -- heavier weight to points closer to xbar
-        # ie with greater distance ie higher __weighter
+        # ie with greater distance ie higher
         # since this is a minimization not clear why need to divide by the sum of all distances?
 
         # OPTIMIZATION FORMULATION

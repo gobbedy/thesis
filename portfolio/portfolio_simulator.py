@@ -1,11 +1,12 @@
 import portfolio
 import logging
 from decorators import timed, profile
+import torch
 
 class Portfolio_simulator:
 
 
-    def __init__(self, name, num_iterations, num_samples_list, sanity=False, profile=False, x_data_filename='', y_data_filename=''):
+    def __init__(self, name, num_iterations, num_samples_list, sanity=False, profile=False, x_data_filename='', y_data_filename='', device=torch.device('cpu')):
         self.name = name
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
@@ -13,6 +14,7 @@ class Portfolio_simulator:
         self.profile = profile
         self.x_data_filename = x_data_filename
         self.y_data_filename = y_data_filename
+        self.device = device
         self.configure_logger()
 
     def __str__(self):
@@ -39,7 +41,7 @@ class Portfolio_simulator:
 
         epsilon=0.15
         lambda_=0.0
-        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.sanity, self.profile)
+        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.sanity, self.profile, self.device)
 
         #
         if self.x_data_filename and not self.y_data_filename:

@@ -1,0 +1,5 @@
+export SRUN_OPTIONS_GPU="--gres=gpu:1  --time=00:30:00 --job-name=portfolio --mem=2gb"
+#export SRUN_OPTIONS_CPU="--cpus-per-task=4 --time=00:30:00 --job-name=portfolio --mem=2gb"
+#export SRUN_OPTIONS_CPU="--cpus-per-task=4 --time=00:30:00 --job-name=portfolio"
+export SRUN_OPTIONS_CPU="--time=00:30:00 --job-name=portfolio"
+export EMAIL=gperr050@uottawa.ca
