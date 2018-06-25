@@ -390,13 +390,11 @@ class Nearest_neighbors_portfolio:
 
         mahalanobis_distances, perm = torch.sort(mahalanobis_distances, 0)
         Y_nn = Y_tensor[perm].numpy() # now local scope
-        X_nn = X_tensor[perm].numpy()  # now local scope
 
         # Define set of points of interest
         inclusive_distance_boundary = mahalanobis_distances[hyperparameters_object.k - 1] + 1e-7
 
         # adjusted k to avoid eliminating equi-distant points
-        ###inclusive_k_nearest_neighbor_indices = np.where(mahalanobis_distances <= inclusive_distance_boundary)[0]
         inclusive_k_nearest_neighbor_indices = torch.nonzero(mahalanobis_distances <= inclusive_distance_boundary).squeeze().numpy()
 
         # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
