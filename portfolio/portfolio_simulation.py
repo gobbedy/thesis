@@ -32,6 +32,7 @@ args = parser.parse_args()
 
 # configure logger
 logger = logging.getLogger('portfolio_simulation')
+logger.propagate = 0
 logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
 ch.setLevel(logging.INFO)
@@ -44,7 +45,7 @@ logger.info(time.ctime())
 logger.info("Start portfolio simulation")
 num_iterations=1
 num_samples_list=[8]
-simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.sanity, args.profile, "data/X_nt.csv.short", "data/Y_nt.csv.short", device)
+simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.sanity, args.profile, "data/X_nt.csv", "data/Y_nt.csv", device)
 simulator.run_simulation()
 logger.info("End portfolio simulation")
 logger.info(time.ctime())

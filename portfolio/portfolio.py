@@ -4,16 +4,13 @@ from math import sqrt, floor, ceil
 import cvxpy as cp
 import value_at_risk
 import smoother
-import weighter
+#import weighter
+import hyperparameters
 import logging
 from decorators import timed, profile
 import torch
-import platform
-# faiss not available on Windows
-if not platform.system() == "Windows":
-    import faiss
 
-from multiprocessing.dummy import Pool as ThreadPool 
+from multiprocessing import Pool as ThreadPool
 
 class Nearest_neighbors_portfolio:
 
@@ -57,7 +54,7 @@ class Nearest_neighbors_portfolio:
 
         if self.sanity:
 
-            # train on first n samples; note: each row is a sample!
+            # train on first num_samples_in_dataset samples; note: each row is a sample!
             self.X_tr = self.X_data[0:self.num_samples]
             self.Y_tr = self.Y_data[0:self.num_samples]
 
@@ -80,7 +77,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_full_information_hyperparameters(self):
 
-        self.upper_diag_fi, self.k_fi, self.weighter_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
+        self.hyperparameters_fi = self.compute_hyperparameters(self.Y_data, self.X_data)
 
 
     # can find analytically?
@@ -89,8 +86,8 @@ class Nearest_neighbors_portfolio:
 
         fi_learner_oos_cost = 0
         for x_val in self.X_data:
-            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data, self.upper_diag_fi,
-                                                                               self.k_fi, self.weighter_fi, x_val)
+            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data,
+                                                                               self.hyperparameters_fi, x_val)
             fi_learner_oos_cost += c_fi
 
 
@@ -105,7 +102,7 @@ class Nearest_neighbors_portfolio:
         #         -- from which we get weighter based on heuristically chosen bandwidth and smoother)
         #     -- learn the number of nearest neighbours
         logging.info("Getting hyperparameters for training NN model...")
-        self.upper_diag_tr, self.k_tr, self.weighter_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
+        self.hyperparameters_tr = self.compute_hyperparameters(self.Y_tr, self.X_tr)
 
 
     @timed
@@ -120,8 +117,8 @@ class Nearest_neighbors_portfolio:
                 logging.debug("out: " + str(idx))
 
             # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr, self.upper_diag_tr,
-                                                                               self.k_tr, self.weighter_tr, x_val)
+            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr,
+                                                                               self.hyperparameters_tr, x_val)
 
             # find b (VaR) analytically
             b=value_at_risk.value_at_risk(x_val, z_tr, self.epsilon)
@@ -129,8 +126,7 @@ class Nearest_neighbors_portfolio:
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.upper_diag_fi, self.k_fi,
-                                                       self.weighter_fi)
+            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.hyperparameters_fi)
 
             tr_learner_oos_cost_true += c_tr_true
 
@@ -168,324 +164,259 @@ class Nearest_neighbors_portfolio:
     def compute_hyperparameters(self, Y, X, p=0.2, smoother_list=[smoother.Smoother("Naive")]):
 
         # num rows X -- ie num samples
-        n = np.size(X, 0)
+        num_samples_in_dataset = np.size(X, 0)
 
         # num cols X -- ie num covariates
-        d_x = np.size(X, 1)
+        num_covariates = np.size(X, 1)
 
         # num cols of Y -- ie num assets
-        d_y = np.size(Y, 1)
+        num_assets = np.size(Y, 1)
 
         logging.debug("## Problem Parameters")
-        logging.debug("1. Number of samples n = " + str(n))
-        logging.debug("2. Label dimension : " + str(d_y))
-        logging.debug("3. Covariate dimension : " + str(d_y))
+        logging.debug("1. Number of samples num_samples_in_dataset = " + str(num_samples_in_dataset))
+        logging.debug("2. Label dimension : " + str(num_assets))
+        logging.debug("3. Covariate dimension : " + str(num_assets))
         logging.debug("## Hyperparameter optimization")
         logging.debug("1. Proportion VALIDATION/TOTAL data =" + str(p))
         logging.debug("2. Considered Smoothers : " + str(smoother_list))
 
         # Compute covariance of covariates
         # TODO: check the math, why identity -- is this really mahalanobis?
-        epsilonX = np.cov(X.T, bias=True) + np.identity(d_x)/n
+        epsilonX = np.cov(X.T, bias=True) + np.identity(num_covariates)/num_samples_in_dataset
 
-        # Note: can get performance gain setting check_finite to false
-        # Note2: what is returned is the lower left matrix despite lower=false, why?
-        ##(epsilonX, lower) = cho_factor(epsilonX, overwrite_a=True, check_finite=True)
         upper_diag = torch.from_numpy(epsilonX)
         torch.potrf(upper_diag, out=upper_diag)
-
-        # Distance function -- note that distance function -- smoother built on top
-        
-        ##d = lambda x1, x2: np.sqrt((x1-x2) @ cho_solve((epsilonX, lower), x1-x2, overwrite_b=True, check_finite=True))
-        d = lambda x1, x2: torch.sqrt(torch.mm((x1-x2).transpose(0,1), torch.potrs((x1-x2), upper_diag) ))
-        ###def d(x1, x2):
-        ###    torch.sqrt(torch.mm((x1-x2).view(1,len(x1)), torch.potrs((x1-x2).view(len(x1),1), upper_diag) ))
-
-        # distance function
-        ##d = lambda x1, x2: self.mahalanobis(x1, x2, epsilonX)
 
         # hyperparameters
 
         # TODO: add this unused julia code for NW portfolio?
-        #D = [d(X[i, :], mean_X) for i in range(0,n)]
+        #D = [d(X[i, :], mean_X) for i in range(0,num_samples_in_dataset)]
 
-        k_all = np.unique(np.round(np.linspace(max(1, floor(sqrt(n)/1.5)), min(ceil(sqrt(n)*1.5), n), 20).astype('int')))
+        k_list = np.unique(np.round(np.linspace(max(1, floor(sqrt(num_samples_in_dataset)/1.5)), min(ceil(sqrt(num_samples_in_dataset)*1.5), num_samples_in_dataset), 20).astype('int')))
 
         # pick 20% of the original (training) samples as your validation set -- note: sorting not necessary
         if self.sanity:
-            val = range(round(n*p))
+            val = range(round(num_samples_in_dataset*p))
         else:
-            val = sorted(random.sample(range(n), round(n*p)))
+            val = sorted(random.sample(range(num_samples_in_dataset), round(num_samples_in_dataset*p)))
 
         # the remaining 80% is your new "training" set
-        train = sorted(list(set(range(n)) - set(val)))
+        train = sorted(list(set(range(num_samples_in_dataset)) - set(val)))
 
-        logging.debug("Number of k to test: " + str(len(k_all)))
+        logging.debug("Number of k to test: " + str(len(k_list)))
 
         shortest_distance = -1
-        for __smoother in smoother_list:
-            for k in k_all:
+        for test_smoother in smoother_list:
+            for test_k in k_list:
 
                 # TODO: add this unused julia code for NW portfolio?
                 #bandwidth_list = logspace(log10(minimum(D)), log10(maximum(D)), 10)
-                if __smoother == "Naive":
+                if test_smoother == "Naive":
                     bandwidth_list = [1]
 
                 for bandwidth in bandwidth_list:
 
-                    __weighter = weighter.Weighter(__smoother, d, bandwidth)
+                    test_hyperparameters = hyperparameters.Hyperparameters(test_k, test_smoother, upper_diag, bandwidth)
 
-                    logging.debug("Smoother function : " + str(__weighter))
-                    logging.debug("Number of neighbors : k = " + str(k))
+                    logging.debug("Smoother function : " + str(test_hyperparameters))
+                    logging.debug("Number of neighbors : k = " + str(test_k))
 
                     
                     # find E[Y|xbar] for all X in validation set
-                    Yp = self.compute_expected_response(Y[train], X[train], X[val], upper_diag, k, __weighter)
+                    expected_response = self.compute_expected_response(Y[train], X[train], X[val], test_hyperparameters)
 
                     # sum distance of all these E[Y|xbar] to true Y (respectively)
-                    model_distance = np.sum((Y[val]-Yp)**2)
+                    model_distance = np.sum((Y[val]-expected_response)**2)
 
                     # the shortest such distance corresponds to most accurate model, ie 
-                    # this model has best weighter/k combination, so we store weighter/k
+                    # this model has best hyperparameters, so we store them
                     if model_distance < shortest_distance or shortest_distance == -1:
                         shortest_distance = model_distance
-                        hyperparameters = (k, __weighter)
+                        shortest_distance_hyperparameters = test_hyperparameters
 
-        return (upper_diag, hyperparameters[0], hyperparameters[1])
+        return shortest_distance_hyperparameters
 
 
-    """
-        compute_expected_response(Y, X, Xbar, d, k, __weighter )
-
-    # Arguments
-
-        1. `Y` : Array of observed responses
-        2. `X` : Covariate data
-        3. `xbar` : Context of interest
-        4. `d` : Distance metric
-        5. `k` : Number of considered neighbors
-        6. `__weighter` : Weighter function
-
-    # Returns
-        1. `Yp` : Nearest neighbors prediction
-
-    """
-    # find E[Y|X]:
-    # 1. Find k nearest neighbors based on mahalanobis distance
-    # 2. Adjust k in case points just outside k-set have equal distance as kth point
-    # 3. Assign weights based on mahalanobis distance and a bandwidth
-    # 4. Apply smoother on top of these weights
     @timed
     @profile
-    def compute_expected_response(self, Y, X, Xbar, upper_diag, k, __weighter):
+    def compute_expected_response(self, Y, X, Xbar, hyperparameters_object):
 
-        n = np.size(Y, 0)
+        """
+        Arguments:
+
+            Y: historical 'response' variable (typically asset returns)
+            X: historical covariates
+            Xbar: observation ("today's" covariate) -- can be interpreted as X context of interest
+            hyperparameters_object: number of nearest neighbors k, smoother function, upper_diagonal, bandwidth
+              -- uuper diagonal is Cholesky factor of mahalanobis matrix
+
+        Returns:
+
+            expected_response: expected response given Xbar observation/context
+
+
+        Description:
+
+            1. Find the k nearest neighbors of Xbar inside X, using mahalanobis distance
+            2. Adjust k so that points just outside k-set which have equal distance as kth point are included
+               -- call this adjusted k, "inclusive_k"
+            3. Assign weights based on mahalanobis distance, a bandwidth, and a smoothing function
+               -- Points further from xbar generally have smaller weights (naive smoother has equal weights)
+               -- Smoother transforms distance to weights (eg for gaussian smoother, zero distance is center
+                  of gaussian curve and further distances fall with distance from center)
+               -- Higher bandwidth reduces distance as seen by smoothing function
+                  -- depending on smoother this could have different effects (for example, for square uniform,
+                     will give zero weight to fewer points)
+
+        """
+        num_samples_in_dataset = np.size(Y, 0)
 
         if Y.ndim == 2:
-          d_y = np.size(Y, 1)
+          num_assets = np.size(Y, 1)
         else: # Y.ndim ==1
-          d_y = 1
+          num_assets = 1
+
+        num_covariates = np.size(X,1)
 
         if Xbar.ndim == 2:
-            m = np.size(Xbar, 0)
+            num_observations = np.size(Xbar, 0)
         else: # Xbar.dim == 1
-            m = 1
+            num_observations = 1
 
-        logging.debug("# Hyper Parameters")
-        logging.debug("1. Number of nearest neighbors k = " + str(k))
-        logging.debug("2. Smoother function S = " + str(__weighter))
-        logging.debug("# Problem Parameters")
-        logging.debug("1. Number of samples n = " + str(n))
-        logging.debug("2. Label dimension : " + str(d_y))
-        logging.debug("3. Number of contexts : " + str(m))
-
-        Xbar_tensor=torch.from_numpy(Xbar)
+        Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
         X_tensor = torch.from_numpy(X)
         Y_tensor = torch.from_numpy(Y)
 
-        Yp = np.zeros((m, d_y))
+        expected_response = np.zeros((num_observations, num_assets))
 
-        if platform.system() == "UNUSED":
-        #if not platform.system() == "Windows":
-            # note: this does not use "expanded" k
-            index = faiss.IndexFlatL2(X_tensor.size(1))
-            index.add(X)
-            distances, nearest_neighbor_index_matrix = index.search(Xbar, k)
-            for idx, nearest_neighbor_index_array in enumerate(nearest_neighbor_index_matrix):
-                S = np.empty_like(nearest_neighbor_index_array)
-                for jdx, nearest_neighbor_index in enumerate(nearest_neighbor_index_array):
-                    S[jdx] = weight_from_xbar(distances[idx, jdx])
-                Yp[idx] = np.mean((S * Y_tensor[nearest_neighbor_index_array].numpy().T).T, 0)
+        logging.debug("# Hyper Parameters")
+        logging.debug("1. Number of nearest neighbors k = " + str(hyperparameters_object.k))
+        logging.debug("2. Smoother = " + str(hyperparameters_object))
+        logging.debug("# Problem Parameters")
+        logging.debug("1. Number of samples num_samples_in_dataset = " + str(num_samples_in_dataset))
+        logging.debug("2. Label dimension : " + str(num_assets))
+        logging.debug("3. Number of contexts : " + str(num_observations))
 
-        else:
+        for j in range(num_observations):
 
-            for j in range(m):
+            ## Context of interest
+            xbar = Xbar_tensor[j]
 
-                ## Context of interest
-                # if I only input one observation, m=1 and xbar = Xbar
-                if Xbar.ndim == 2:
-                    xbar = Xbar_tensor[j]
-                else: # Xbar.dim == 1
-                    xbar = Xbar_tensor
+            # x1 - x2
+            Xsub = X_tensor - xbar
+            Z = torch.trtrs(Xsub.transpose(0,1), hyperparameters_object.upper_diag.transpose(0,1), upper=False)[
+                0].transpose(0,1)
 
+            # mahalanobis_distances: mahalanobis distance of each X vector to Xbar
+            # L2 norm -- note: square root not necessary, since we only car about sorting not absolute actual number
+            # but since speed of this call is not a bottleneck, this is fine
+            mahalanobis_distances = torch.norm(Z, p=2, dim=1)
 
-                ## SORT the data based on distance to xbar
-                # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-                dist_from_xbar = lambda x1: d(x1.view(len(x1),1), xbar.view(len(xbar),1))
+            ## SORT the data based on distance to xbar
+            mahalanobis_distances_sorted, sorted_indices = torch.sort(mahalanobis_distances, 0)
 
+            Y_sorted = Y_tensor[sorted_indices] # now local scope
 
+            # adjust k to avoid eliminating equi-distant points
+            inclusive_distance_boundary = mahalanobis_distances_sorted[hyperparameters_object.k - 1] + 1e-7
 
-                ##pool = ThreadPool(16)
-                ##dist = np.array(pool.map(dist_from_xbar, X_tensor))
-                ##pool.close()
-                ##pool.join()
+            # cast to int because of weird incompatibility between zero-dim tensor and int in pytorch 0.4.0
+            inclusive_k = int(np.searchsorted(mahalanobis_distances_sorted, inclusive_distance_boundary,side='right'))
 
-                # x1 - x2
-                Xsub = X_tensor - xbar
-                Z=torch.empty(X_tensor.size())
-                for i in range(n):
-                    # z = Linv * (x - xbar), where L is lower diagonal matrix
-                    Z[i]=torch.trtrs(Xsub[i], upper_diag.transpose(0,1), upper=False)[0].transpose(0,1)
+            # get indices of nearest neighbors
+            inclusive_k_nearest_neighbor_indices = np.arange(inclusive_k)
 
+            '''
+            # This is a template for applying non-naive smoother to weigh nearest-neighbor points
+            # The code was functionally tested and can be used as is except the for loop for which a form of 
+            # broadcasting should be found, if possible for the smoother in question (for speed)           
+            weights = mahalanobis_distances[inclusive_k_nearest_neighbor_indices] / hyperparameters_object.bandwidth
+            for i in inclusive_k_nearest_neighbor_indices:
+                weights[i] = hyperparameters_object.smoother(weights[i])
+            weights = weights / sum(weights)
+            
+            # unsqueeze(1)/view(inclusive_k, 1) for broadcast multiplication to work as expected;
+            # double() needed because smoother tested (naive) spits out a float (1.0) value instead of double.
+            # double() likely won't be needed if/when this actually needs to be used
+            # since smoother will likely divide/multiply an existing double() and therefore return a double
+            weights = weights.view(inclusive_k, 1).double()
 
-                # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
-                # but since speed is not the objective here, this is fine
-                #dist = torch.norm(X_tensor)
-                dist = torch.norm(Z, p=2, dim=1)
+            # E[Y|xbar], ie weighted/"smoothed" average of the Y[i,:] corresponding to the nearest inclusive_k X
+            expected_response[j] = torch.sum(weights * Y_tensor[inclusive_k_nearest_neighbor_indices].view(
+                inclusive_k, num_assets), 0)
+            
+            '''
+            expected_response[j] = torch.mean(Y_sorted[inclusive_k_nearest_neighbor_indices], 0)
 
-
-                ###dist = np.empty(n)
-                ###X_tensor=torch.from_numpy(X)
-                ###for i in range(n):
-                ###    dist[i] = dist_from_xbar(X_tensor[i])
-
-                ##dist = np.apply_along_axis(dist_from_xbar, 1, X)
-                # dist = [d(X[i], xbar ) for i in range(n)]
-
-                dist, perm = torch.sort(dist, 0)
-                Y_tensor = Y_tensor[perm] # now local scope
-                X_tensor = X_tensor[perm] # now local scope
-
-
-                ###perm = np.argsort(dist)
-                ###dist = dist[perm]
-                ###Y = Y[perm] # now local scope
-                ###X = X[perm] # now local scope
-
-                # Define set of points of interest
-                R_star = dist[k-1]+1e-7
-
-                # adjusted k to avoid eliminating equi-distant points
-                # Nk is an array of indices
-                ###Nk = np.where(dist <= R_star)[0]
-                Nk = torch.nonzero(dist <= R_star).squeeze().numpy()
-                # note: __weighter is a Weighter object
-
-
-                # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-                weight_from_xbar = lambda x1: __weighter.smoother(x1 / __weighter.bandwidth)
-                #self.smoother(self.distance(x1, x2) / self.bandwidth)
-                if Nk.ndim > 0:
-                    S = np.empty_like(Nk)
-                    for i in Nk:
-                        S[i] = weight_from_xbar(dist[i])
-                # handle case where Nk is scalar ("0-d array" technically)
-                else:
-                    S = weight_from_xbar(dist[Nk])
-                ##S = np.apply_along_axis(weight_from_xbar, 1, X[Nk])
-                #S = [weight_fcn(X[i], xbar) for i in Nk]
-
-                ## Prediction --> this is E[Y|X]!!!
-                # Take the weighted average of all the Y[i,:] -- where i in nearest adjusted_k
-
-                #Y_nearestk_weighted = (S*Y[Nk].T).T
-                #Yp[j] = mean(Y_nearestk_weighted, 0)
-
-                # weighted average of all the Y[i,:] -- where i in nearest adjusted_k
-                #print(Y_tensor.shape)
-                #print(Nk.shape)
-                #print(Y_tensor[Nk].shape)
-                #print(Y_tensor[Nk].numpy().shape)
-                Yp[j] = np.mean((S * Y_tensor[Nk].numpy().T).T, 0)
-                #Yp[j] = np.mean((S * Y_tensor[Nk].transpose(0,1)).transpose(0,1), 0)
-                #Yp[j] = np.mean((S * Y[Nk].T).T, 0)
-
-
-        return Yp
+        return expected_response
     
 #    @timed
-    def optimize_nearest_neighbors_portfolio(self, Y, X, upper_diag, k, __weighter, xbar):
+    def optimize_nearest_neighbors_portfolio(self, Y, X, hyperparameters_object, xbar):
 
-        n = np.size(Y, 0)
+        num_samples_in_dataset = np.size(Y, 0)
 
-        d_y = np.size(Y, 1)
+        num_assets = np.size(Y, 1)
 
         logging.debug("## Problem Parameters")
         logging.debug("1. Risk level CVaR epsilon = " + str(self.epsilon))
         logging.debug("2. Risk / Reward trade off __lambda = " + str(self.__lambda))
         logging.debug("## Problem dimensions ")
-        logging.debug("1. Number of samples n = " + str(n))
-        logging.debug("2. Label dimension : " + str(d_y))
+        logging.debug("1. Number of samples num_samples_in_dataset = " + str(num_samples_in_dataset))
+        logging.debug("2. Label dimension : " + str(num_assets))
         logging.debug("## Hyper parameters")
-        logging.debug("1. Number of nearest neighbors k = " + str(k))
-        logging.debug("2. Weighter function __weighter = " + str(__weighter))
+        logging.debug("1. Number of nearest neighbors k = " + str(hyperparameters_object.k))
+        logging.debug("2. Hyperparameters hyperparameters_object = " + str(hyperparameters_object))
 
         ## SORT the data based on distance to xbar        
 
         ## Context of interest
-        # if I only input one observation, m=1 and xbar = Xbar
+        # if I only input one observation, num_observations=1 and xbar = Xbar
         xbar_tensor = torch.from_numpy(xbar)
 
         X_tensor = torch.from_numpy(X)
         Y_tensor = torch.from_numpy(Y)
-        ##pool = ThreadPool(16)
-        ##dist = np.array(pool.map(dist_from_xbar, X_tensor))
-        ##pool.close()
-        ##pool.join()
 
         # x1 - x2
         Xsub = X_tensor - xbar_tensor
         Z = torch.empty(X_tensor.size())
-        for i in range(n):
+        for i in range(num_samples_in_dataset):
             # z = Linv * (x - xbar), where L is lower diagonal matrix
-            Z[i] = torch.trtrs(Xsub[i], upper_diag.transpose(0, 1), upper=False)[0].transpose(0, 1)
+            Z[i] = torch.trtrs(Xsub[i], hyperparameters_object.upper_diag.transpose(0, 1), upper=False)[0].transpose(0, 1)
 
         # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
         # but since speed is not the objective here, this is fine
-        # dist = torch.norm(X_tensor)
-        dist = torch.norm(Z, p=2, dim=1)
+        # mahalanobis_distances = torch.norm(X_tensor)
+        mahalanobis_distances = torch.norm(Z, p=2, dim=1)
 
-        dist, perm = torch.sort(dist, 0)
+        mahalanobis_distances, perm = torch.sort(mahalanobis_distances, 0)
         Y_nn = Y_tensor[perm].numpy() # now local scope
         X_nn = X_tensor[perm].numpy()  # now local scope
 
         # Define set of points of interest
-        R_star = dist[k - 1] + 1e-7
+        inclusive_distance_boundary = mahalanobis_distances[hyperparameters_object.k - 1] + 1e-7
 
         # adjusted k to avoid eliminating equi-distant points
-        # Nk is an array of indices
-        ###Nk = np.where(dist <= R_star)[0]
-        Nk = torch.nonzero(dist <= R_star).squeeze().numpy()
-        # note: __weighter is a Weighter object
+        ###inclusive_k_nearest_neighbor_indices = np.where(mahalanobis_distances <= inclusive_distance_boundary)[0]
+        inclusive_k_nearest_neighbor_indices = torch.nonzero(mahalanobis_distances <= inclusive_distance_boundary).squeeze().numpy()
 
         # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-        weight_from_xbar = lambda x1: __weighter.smoother(x1 / __weighter.bandwidth)
+        weight_from_xbar = lambda x1: hyperparameters_object.smoother(x1 / hyperparameters_object.bandwidth)
         # self.smoother(self.distance(x1, x2) / self.bandwidth)
-        if Nk.ndim > 0:
-            S = np.empty_like(Nk)
-            for i in Nk:
-                S[i] = weight_from_xbar(dist[i])
-        # handle case where Nk is scalar ("0-d array" technically)
+        if inclusive_k_nearest_neighbor_indices.ndim > 0:
+            S = np.empty_like(inclusive_k_nearest_neighbor_indices)
+            for i in inclusive_k_nearest_neighbor_indices:
+                S[i] = weight_from_xbar(mahalanobis_distances[i])
+        # handle case where inclusive_k_nearest_neighbor_indices is scalar ("0-d array" technically)
         else:
-            S = weight_from_xbar(dist[Nk])
+            S = weight_from_xbar(mahalanobis_distances[inclusive_k_nearest_neighbor_indices])
 
         # Objective -- L is loss L(y,z) -- heavier weight to points closer to xbar
-        # ie with greater distance ie higher __weighter
+        # ie with greater distance ie higher hyperparameters_object
         # since this is a minimization not clear why need to divide by the sum of all distances?
 
         # OPTIMIZATION FORMULATION
-        z = cp.Variable(d_y)
-        L = cp.Variable(len(Nk))
+        z = cp.Variable(num_assets)
+        L = cp.Variable(len(inclusive_k_nearest_neighbor_indices))
         b = cp.Variable(1)
 
         # note: just "sum" instead of long sum_entries command appears to work
@@ -496,7 +427,7 @@ class Nearest_neighbors_portfolio:
         constrs = [z>=0, sum(z)==1]
 
 
-        for i in Nk:
+        for i in inclusive_k_nearest_neighbor_indices:
             # this must define the loss function L. Second part obvious
             # not sure why first part is the same?
             constrs = constrs + [L[i] >= (1-1/self.epsilon)*b - (self.__lambda+1/self.epsilon)*sum(cp.multiply(Y_nn[i], z))]

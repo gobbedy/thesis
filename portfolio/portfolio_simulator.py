@@ -2,6 +2,7 @@ import portfolio
 import logging
 from decorators import timed, profile
 import torch
+import sys
 
 class Portfolio_simulator:
 
@@ -41,7 +42,7 @@ class Portfolio_simulator:
 
         epsilon=0.15
         lambda_=0.0
-        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.sanity, self.profile, self.device)
+        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.sanity, self.profile)
 
         #
         if self.x_data_filename and not self.y_data_filename:
@@ -92,6 +93,8 @@ class Portfolio_simulator:
 
                 # compute oos cost for training model
                 tr_oos_cost = nn_portfolio.compute_training_model_oos_cost()
-                
+
+        #self.logger.info(fi_oos_cost)
+        #self.logger.info(tr_oos_cost)
         print(fi_oos_cost)
         print(tr_oos_cost)
