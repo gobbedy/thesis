@@ -17,7 +17,201 @@ from multiprocessing import Pool as ThreadPool
 import dill as pkl
 import dispy
 import functools
-#import time
+import time
+
+ME_DIR = os.path.dirname(os.path.realpath(__file__))
+
+def setup_expected_responses(generated_data_filepath):
+
+    #global random, np, sqrt, floor, ceil, cp, torch, os
+    #import random
+    #import numpy as np
+    #from math import sqrt, floor, ceil
+    #import cvxpy as cp
+    #import torch
+    #import os
+
+    #import torch
+
+    global np, os, torch
+    import torch
+    import numpy as np
+    import os
+
+    global x_tensor, y_tensor, k, lower_diag, xbar_tensor
+    #global x, y, k, lower_diag_np, xbar_np
+
+    compute_expected_responses_params = np.load(generated_data_filepath)
+
+    k = compute_expected_responses_params['k']
+    lower_diag = torch.from_numpy(compute_expected_responses_params['lower_diag'])
+    x_tensor = torch.from_numpy(compute_expected_responses_params['x'])
+    y_tensor = torch.from_numpy(compute_expected_responses_params['y'])
+    xbar_tensor = torch.from_numpy(compute_expected_responses_params['xbar'])
+
+    #lower_diag_np = compute_expected_responses_params['lower_diag']
+    #x = compute_expected_responses_params['x']
+    #y = compute_expected_responses_params['y']
+    #xbar_np = compute_expected_responses_params['xbar']
+
+    return 0
+
+def compute_expected_response(j):
+
+    #import torch
+
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+    #lower_diag = torch.from_numpy(lower_diag_np)
+    #x_tensor = torch.from_numpy(x)
+    #y_tensor = torch.from_numpy(y)
+    #xbar_tensor = torch.from_numpy(xbar_np)
+
+    ## Context of interest
+    xbar = xbar_tensor[j]
+
+    ### COMPUTE SORTED NEAREST NEIGHBOR
+    Xsub = (x_tensor - xbar).transpose(0, 1)
+
+    Z = torch.trtrs(Xsub, lower_diag, upper=False)[0].transpose(0, 1)
+
+    # mahalanobis_distances: mahalanobis distance of each X vector to Xbar
+    mahalanobis_distances = torch.norm(Z, p=2, dim=1)
+
+    ## SORT the data based on distance to xbar
+    mahalanobis_distances_sorted, sorted_indices = torch.sort(mahalanobis_distances, 0)
+
+    Y_sorted = y_tensor[sorted_indices]  # now local scope
+
+    # adjust k to avoid eliminating equi-distant points
+    inclusive_distance_boundary = mahalanobis_distances_sorted[k - 1] + 1e-7
+
+    # cast to int because of weird incompatibility between zero-dim tensor and int in pytorch 0.4.0
+    inclusive_k = int(np.searchsorted(mahalanobis_distances_sorted, inclusive_distance_boundary, side='right'))
+
+    # get indices of nearest neighbors
+    inclusive_k_nearest_neighbor_indices = np.arange(inclusive_k)
+
+    sorted_nn_tensor = Y_sorted[inclusive_k_nearest_neighbor_indices]
+    ### DONE COMPUTE SORTED NEAREST NEIGHBOR
+
+    os.environ.pop("OMP_NUM_THREADS")
+
+    #return torch.mean(sorted_nn_tensor, 0).size()
+    return torch.mean(sorted_nn_tensor, 0)
+
+
+
+def setup_fi_cost(x_samples_filepath, y_samples_filepath, generated_data_filepath):
+
+    ##global random, np, sqrt, floor, ceil, cp, torch, os
+    global cp, np, os, torch
+    ##import random
+    ##from math import sqrt, floor, ceil
+    import cvxpy as cp
+    import numpy as np
+    import os
+    import torch
+
+    global x_tensor, y_tensor, k, lower_diag, epsilon, __lambda
+    #global x_data, y_data, k, lower_diag_np, epsilon, __lambda
+
+    x_data = np.load(x_samples_filepath)
+    y_data = np.load(y_samples_filepath)
+    #xbar_tensor = torch.from_numpy(x_data)
+    x_tensor = torch.from_numpy(x_data)
+    y_tensor = torch.from_numpy(y_data)
+
+    fi_params = np.load(generated_data_filepath)
+
+    k = fi_params['k']
+    lower_diag = torch.from_numpy(fi_params['lower_diag'])
+    #lower_diag_np = fi_params['lower_diag']
+    epsilon = fi_params['epsilon']
+    __lambda = fi_params['__lambda']
+
+    return 0
+
+def compute_optimal_portfolio(j):
+
+    #import torch
+
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+    #x_tensor = torch.from_numpy(x_data)
+    #y_tensor = torch.from_numpy(y_data)
+    #lower_diag = torch.from_numpy(lower_diag_np)
+
+
+    # 1. get nearest neighbors
+    xbar = x_tensor[j]
+
+    #sorted_nn_tensor = compute_sorted_nearest_neighbors(global_arrays, xbar)
+
+
+    ### COMPUTE SORTED NEAREST NEIGHBOR
+    Xsub = (x_tensor - xbar).transpose(0, 1)
+
+
+    Z = torch.trtrs(Xsub, lower_diag, upper=False)[0].transpose(0, 1)
+
+    # mahalanobis_distances: mahalanobis distance of each X vector to Xbar
+    mahalanobis_distances = torch.norm(Z, p=2, dim=1)
+
+    ## SORT the data based on distance to xbar
+    mahalanobis_distances_sorted, sorted_indices = torch.sort(mahalanobis_distances, 0)
+
+    Y_sorted = y_tensor[sorted_indices]  # now local scope
+
+    # adjust k to avoid eliminating equi-distant points
+    inclusive_distance_boundary = mahalanobis_distances_sorted[k - 1] + 1e-7
+
+    # cast to int because of weird incompatibility between zero-dim tensor and int in pytorch 0.4.0
+    inclusive_k = int(np.searchsorted(mahalanobis_distances_sorted, inclusive_distance_boundary, side='right'))
+
+    # get indices of nearest neighbors
+    inclusive_k_nearest_neighbor_indices = np.arange(inclusive_k)
+
+    sorted_nn_tensor = Y_sorted[inclusive_k_nearest_neighbor_indices]
+    ### DONE COMPUTE SORTED NEAREST NEIGHBOR
+
+    nearest_neighbors = sorted_nn_tensor.numpy()
+
+    # 2. set up optimization problem
+    loss_len = len(nearest_neighbors)
+    num_assets = y_tensor.size(1)
+    z = cp.Variable(num_assets)
+    L = cp.Variable(loss_len)
+    b = cp.Variable(1)
+
+    # note: just "sum" instead of long sum_entries command appears to work
+
+    obj = cp.Minimize(cp.sum(L)/loss_len)
+
+    # Constraints
+    # long only and unit leverage
+    constrs = [z>=0, sum(z)==1]
+
+    for i in range(loss_len):
+        # this must define the loss function L. Second part obvious
+        # not sure why first part is the same?
+        constrs = constrs + [L[i] >= (1-1/epsilon)*b - (__lambda+1/epsilon)*sum(cp.multiply(nearest_neighbors[i], z))]
+        constrs = constrs + [L[i] >= b - __lambda*sum(cp.multiply(nearest_neighbors[i, :], z))]
+
+    # find optimal z, VaR (b) -- which minimizes total cost
+    # this minimum total cost (over hitorical points) is problem.optval
+    problem=cp.Problem(obj, constrs)
+
+
+    # 3. now, optimize
+    problem.solve(solver=cp.ECOS)
+
+    os.environ.pop("OMP_NUM_THREADS")
+
+    #print (problem.value, z.value, b.value, problem.status)
+    #'''
+    #return (0,1,2)
+    return (problem.value, z.value, b.value, problem.status)
 
 class Nearest_neighbors_portfolio:
 
@@ -33,6 +227,7 @@ class Nearest_neighbors_portfolio:
         self.sanity = sanity
         self.short = short
         self.profile = profile
+
         self.configure_logger()
 
     def __str__(self):
@@ -97,46 +292,105 @@ class Nearest_neighbors_portfolio:
     def compute_full_information_oos_cost(self):
 
         # see compute_expected_responses for explanation of this hack
-        global compute_full_information_oos_cost_globals
-        compute_full_information_oos_cost_globals = type('test', (), {})()
+        #global compute_full_information_oos_cost_globals
+        #compute_full_information_oos_cost_globals = type('test', (), {})()
         #compute_full_information_oos_cost_globals = Compute_full_information_oos_cost_vars(torch.from_numpy(self.X_data), torch.from_numpy(self.X_data), torch.from_numpy(self.Y_data), self.hyperparameters_fi, self.epsilon, self.__lambda)
         #compute_full_information_oos_cost_globals.__module__ = '__main__'
-        compute_full_information_oos_cost_globals.Xbar_tensor = torch.from_numpy(self.X_data)
-        compute_full_information_oos_cost_globals.X_tensor = torch.from_numpy(self.X_data)
-        compute_full_information_oos_cost_globals.Y_tensor = torch.from_numpy(self.Y_data)
-        compute_full_information_oos_cost_globals.hyperparameters_object = self.hyperparameters_fi
-        compute_full_information_oos_cost_globals.epsilon = self.epsilon
-        compute_full_information_oos_cost_globals.__lambda = self.__lambda
-        #generated_data_filepath = self.output_dir + "/autogen/full_information_params.npz"
-        #np.savez(generated_data_filepath, k=self.hyperparameters_fi.k, lower_diag=self.hyperparameters_fi.upper_diag.transpose(0, 1),
-        #         epsilon=self.epsilon, __lambda=self.__lambda)
+        #compute_full_information_oos_cost_globals.Xbar_tensor = torch.from_numpy(self.X_data)
+        #compute_full_information_oos_cost_globals.X_tensor = torch.from_numpy(self.X_data)
+        #compute_full_information_oos_cost_globals.Y_tensor = torch.from_numpy(self.Y_data)
+        #compute_full_information_oos_cost_globals.hyperparameters_object = self.hyperparameters_fi
+        #compute_full_information_oos_cost_globals.epsilon = self.epsilon
+        #compute_full_information_oos_cost_globals.__lambda = self.__lambda
+        generated_data_filepath = self.output_dir + "/autogen/full_information_params.npz"
+        np.savez(generated_data_filepath, k=self.hyperparameters_fi.k, lower_diag=self.hyperparameters_fi.upper_diag.transpose(0, 1),
+                 epsilon=self.epsilon, __lambda=self.__lambda)
 
-        num_cores = int(available_cpu_count())
+        #num_cores = int(available_cpu_count())
         #print(num_cores)
-        os.environ["OMP_NUM_THREADS"] = "1"
+        #os.environ["OMP_NUM_THREADS"] = "1"
 
-        #'''
+        '''
         pool = ThreadPool(num_cores)
-        print("THIS SHOULD PRINT EARLY")
         args_iterable = zip(itertools.repeat("compute_full_information_oos_cost_globals"), range(len(self.X_data)))
-        #optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,args_iterable,10)
-        optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio, args_iterable)
-        #'''
+        optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,args_iterable,10)
+        '''
 
-        #'''
+        '''
+        from pathos.pp import ParallelPythonPool as Pool
+        ppservers = ("nia0859.scinet.local:1234",)
+        pool = Pool(num_cores*2, servers=ppservers)
+
+
+        #optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,
+        #                zip(itertools.repeat("compute_full_information_oos_cost_globals"), range(len(self.X_data))),
+        #                                      1000)
+
+        #optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,
+        #                zip(itertools.repeat("compute_full_information_oos_cost_globals"), range(len(self.X_data))))
+
+
+        #args_iterable = zip(itertools.repeat("compute_full_information_oos_cost_globals"), range(len(self.X_data)))
+        #optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,args_iterable)
+
+
+        args_iterable = zip(itertools.repeat("compute_full_information_oos_cost_globals"), range(len(self.X_data)))
+        optimal_portfolio_results_object = pool.amap(Nearest_neighbors_portfolio.compute_optimal_portfolio, *map(list, zip(*args_iterable)) )
+        optimal_portfolio_list = optimal_portfolio_results_object.get()
+        '''
+        #pkl_filename = 'compute_full_information_oos_cost_globals.pkl'
+        #with open(pkl_filename, 'wb') as handle:
+        #    pkl.dump(compute_full_information_oos_cost_globals, handle)
+
+        x_samples_filepath = ME_DIR + '/' + self.x_samples_filename
+        y_samples_filepath = ME_DIR + '/' + self.y_samples_filename
+
+        # change working directory temporarily to force JobCluster command to dump in the proper output directory
+        original_working_dir = os.getcwd()
+        os.chdir(self.output_dir + '/' + 'dispy')
+
+        # tell dispy where all the compute nodes are and set them up using setup command
+        cluster = dispy.JobCluster(compute_optimal_portfolio, nodes=self.compute_nodes_pythonic, setup=functools.partial(setup_fi_cost, x_samples_filepath, y_samples_filepath, generated_data_filepath))
+        #cluster = dispy.JobCluster(compute_optimal_portfolio, nodes=["nia1189.scinet.local", ], setup=setup)
+
+        # return to original working dir to avoid any unintended effects from dir change
+        os.chdir(original_working_dir)
+
+        jobs = []
+        for i in range(len(self.X_data)):
+        #for i in range(10):
+            self.i = i
+            job = cluster.submit(i) # it is sent to a node for executing 'compute'
+            job.id = i # store this object for later use
+            jobs.append(job)
+
+        full_information_oos_costs = np.empty(len(self.X_data))
+        for idx, job in enumerate(jobs):
+            job() # wait for job to finish
+            full_information_oos_costs[idx] = job.result[0]
+
+        cluster.close()
+
+        # relaunch dispynodes because of this bug: https://github.com/pgiri/dispy/issues/143
+        cmd_str = 'launch_remote_dispynodes.sh ' + self.output_dir + ' ' + ' '.join(self.compute_nodes)
+        os.system(cmd_str)
+        time.sleep(3)
+
+
+        '''
         pool.close()
         pool.join()
-        #'''
-        os.environ.pop("OMP_NUM_THREADS")
+        '''
+        #os.environ.pop("OMP_NUM_THREADS")
 
 
         # extract only costs from list of portfolio problem tuples (cost is first element of every tuple
         # see https://stackoverflow.com/a/31297256/8112889
-        full_information_oos_costs_list = list(zip(*optimal_portfolio_list))[0]
+        #full_information_oos_costs_list = list(zip(*optimal_portfolio_list))[0]
 
         # convert costs list to torch tensor
         #full_information_oos_costs = torch.stack(full_information_oos_costs_list)
-        full_information_oos_costs = np.array(full_information_oos_costs_list)
+        #full_information_oos_costs = np.array(full_information_oos_costs_list)
 
         #return torch.mean(full_information_oos_costs)
         return np.mean(full_information_oos_costs)
@@ -368,13 +622,57 @@ class Nearest_neighbors_portfolio:
         # only the j argument. -- will need to check if the resulting function truly creates shared arrays
         # and doesn't clone
 
-        global compute_expected_responses_globals
-        compute_expected_responses_globals = type('', (), {})() # see https://stackoverflow.com/a/19476841/8112889
-        compute_expected_responses_globals.Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
-        compute_expected_responses_globals.X_tensor = torch.from_numpy(X)
-        compute_expected_responses_globals.Y_tensor = torch.from_numpy(Y)
-        compute_expected_responses_globals.hyperparameters_object = hyperparameters_object
+        #global compute_expected_responses_globals
+        #compute_expected_responses_globals = type('', (), {})() # see https://stackoverflow.com/a/19476841/8112889
+        #compute_expected_responses_globals.Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
+        #compute_expected_responses_globals.X_tensor = torch.from_numpy(X)
+        #compute_expected_responses_globals.Y_tensor = torch.from_numpy(Y)
+        #compute_expected_responses_globals.hyperparameters_object = hyperparameters_object
 
+        #'''
+        generated_data_filepath = self.output_dir + '/autogen/compute_expected_responses_params.npz'
+        np.savez(generated_data_filepath, k=hyperparameters_object.k, lower_diag=hyperparameters_object.upper_diag.transpose(0, 1),
+                 x=X, y=Y, xbar=Xbar.reshape(num_observations,-1))
+
+        # change working directory temporarily to force JobCluster command to dump in the proper output directory
+        original_working_dir = os.getcwd()
+        os.chdir(self.output_dir + '/' + 'dispy')
+
+        # tell dispy where all the compute nodes are and set them up using setup command
+        cluster = dispy.JobCluster(compute_expected_response, nodes=self.compute_nodes_pythonic, setup=functools.partial(setup_expected_responses, generated_data_filepath))
+        #cluster = dispy.JobCluster(compute_optimal_portfolio, nodes=["nia1189.scinet.local", ], setup=setup)
+
+        # return to original working dir to avoid any unintended effects from dir change
+        os.chdir(original_working_dir)
+
+        jobs = []
+
+        for i in range(num_observations):
+        #for i in range(10):
+            self.i = i
+            job = cluster.submit(i) # it is sent to a node for executing 'compute'
+            job.id = i # store this object for later use
+            jobs.append(job)
+
+        #expected_responses_list = np.empty(len(self.Xbar))
+        expected_responses_list = torch.empty(num_observations, num_assets)
+        for idx, job in enumerate(jobs):
+            job() # wait for job to finish
+            #BLA")
+            #print(job.result)
+            #print("BLU")
+            #exit()
+            expected_responses_list[idx] = job.result
+
+        cluster.close()
+        
+        # relaunch dispynodes because of this bug: https://github.com/pgiri/dispy/issues/143
+        cmd_str = 'launch_remote_dispynodes.sh ' + self.output_dir + ' ' + ' '.join(self.compute_nodes)
+        os.system(cmd_str)
+        time.sleep(3)
+        #'''
+
+        '''
         ts = time()
         num_cores = int(available_cpu_count())
         #num_cores = 32
@@ -389,16 +687,12 @@ class Nearest_neighbors_portfolio:
         pool.close()
         pool.join()
         te = time()
-        os.environ.pop("OMP_NUM_THREADS")
+        #os.environ.pop("OMP_NUM_THREADS")
 
         expected_responses = torch.stack(expected_responses_list).numpy()
-        #'''
+        '''
 
-        #print(expected_responses_list[0])
-        #print(type(expected_responses_list[0]))
-        #exit()
-        #expected_responses = torch.stack(expected_responses_list).numpy()
-        #expected_responses = expected_responses_list.numpy()
+        expected_responses = expected_responses_list.numpy()
 
         return expected_responses
 
@@ -485,7 +779,7 @@ class Nearest_neighbors_portfolio:
         import torch
         import os
 
-        #os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["OMP_NUM_THREADS"] = "1"
         #if j%100 == 0:
         #    print("compute_optimal_portfolio: start k-nearest: ", j)
 
@@ -540,6 +834,6 @@ class Nearest_neighbors_portfolio:
         #print("compute_optimal_portfolio: start optimization: ", j)
         problem.solve(solver=cp.ECOS)
 
-        #os.environ.pop("OMP_NUM_THREADS")
+        os.environ.pop("OMP_NUM_THREADS")
 
         return (problem.value, z.value, b.value, problem.status)
