@@ -7,11 +7,15 @@ import sys
 class Portfolio_simulator:
 
 
-    def __init__(self, name, num_iterations, num_samples_list, sanity=False, profile=False, x_data_filename='', y_data_filename='', device=torch.device('cpu')):
+    def __init__(self, name, compute_nodes, compute_nodes_pythonic, num_iterations, num_samples_list, output_dir, sanity=False, short=False, profile=False, x_data_filename='', y_data_filename='', device=torch.device('cpu')):
         self.name = name
+        self.compute_nodes = compute_nodes
+        self.compute_nodes_pythonic = compute_nodes_pythonic
         self.num_iterations = num_iterations
         self.num_samples_list = num_samples_list
+        self.output_dir = output_dir
         self.sanity = sanity
+        self.short = short
         self.profile = profile
         self.x_data_filename = x_data_filename
         self.y_data_filename = y_data_filename
@@ -42,24 +46,28 @@ class Portfolio_simulator:
 
         epsilon=0.15
         lambda_=0.0
-        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", epsilon, lambda_, self.sanity, self.profile)
 
-        #
-        if self.x_data_filename and not self.y_data_filename:
-            # TODO: convert to error
-            raise ValueError("X data filename has been set but not Y data filename")
-        elif self.y_data_filename and not self.x_data_filename:
-            raise ValueError("Y data filename has been set but not X data filename")
+        # TODO: switch back to full data
+        if self.sanity:
+            x_samples_filename = "data/X_nt.npy.sanity"
+            y_samples_filename = "data/Y_nt.npy.sanity"
+        elif self.short:
+            x_samples_filename = "data/X_nt.npy.short"
+            y_samples_filename = "data/Y_nt.npy.short"
+        elif self.x_data_filename and self.y_data_filename:
+            x_samples_filename = self.x_data_filename
+            y_samples_filename = self.y_data_filename
+        else:
+            raise ValueError("ERROR: gen data not integrated yet")
+
+        nn_portfolio = portfolio.Nearest_neighbors_portfolio("nn_portfolio", self.compute_nodes,
+                                                             self.compute_nodes_pythonic, epsilon, lambda_,
+                                                             self.output_dir, x_samples_filename, y_samples_filename,
+                                                             self.sanity, self.short, self.profile)
 
 
         # load data
-        # TODO: switch back to full data
-        if self.sanity:
-            nn_portfolio.load_data_from_csv("data/X_nt.csv.sanity", "data/Y_nt.csv.sanity")
-        elif self.x_data_filename and self.y_data_filename:
-            nn_portfolio.load_data_from_csv(self.x_data_filename, self.y_data_filename)
-        else:
-            raise ValueError("ERROR: gen data not integrated yet")
+        nn_portfolio.load_data()
 
         # NOTE: the next two lines are kept outside of the "num_iterations"
         # loop even though hyperparameter training is stochastic
@@ -73,9 +81,14 @@ class Portfolio_simulator:
         
         # get full information hyperparameters
         nn_portfolio.compute_full_information_hyperparameters()
+        #exit()
         
         # compute oos cost for full information model
         fi_oos_cost = nn_portfolio.compute_full_information_oos_cost()
+
+        print(fi_oos_cost)
+
+        '''
 
         # outer loop especially useful at low number of samples
         for i in range(self.num_iterations):
@@ -93,8 +106,11 @@ class Portfolio_simulator:
 
                 # compute oos cost for training model
                 tr_oos_cost = nn_portfolio.compute_training_model_oos_cost()
+                
+        '''
 
         #self.logger.info(fi_oos_cost)
         #self.logger.info(tr_oos_cost)
-        print(fi_oos_cost)
-        print(tr_oos_cost)
+
+        ##print(fi_oos_cost)
+        ##print(tr_oos_cost)

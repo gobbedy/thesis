@@ -1,9 +1,21 @@
 #!/usr/bin/env python3.6
 
 import numpy as np
+import argparse
+from time import time
+
+ts = time()
 
 dx=3
 dy=12
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-d", "--deterministic", help="make code deterministic by seeding", action="store_true")
+parser.add_argument('-n','--num_samples', type=int, help='number of X/Y samples to generated', required=True)
+args = parser.parse_args()
+
+if args.deterministic:
+  np.random.seed(1)
 
 # A. Set sigma_u
 
@@ -36,7 +48,7 @@ A = 0.025 * np.array([[0.8,0.1,0.1],[0.1,0.8,0.1],[0.1,0.1,0.8],[0.8,0.1,0.1],[0
 B = 0.075 * np.array([[0,-1,-1],[-1,0,-1],[-1,-1,0],[0,-1,1],[-1,0,1],[-1,1,0],[0,1,-1],[1,0,-1],[1,-1,0],[0,1,1],[1,0,1],[1,1,0]])
 
 # Get 100,000 samples of the U process (each row is a sample)
-num_samples=100000
+num_samples=args.num_samples
 U = np.random.multivariate_normal(np.zeros(dx), sigma_u, num_samples)
 
 X = np.zeros([num_samples, dx])
@@ -49,6 +61,10 @@ for i in range(2, num_samples):
 
 delta = np.random.standard_normal((num_samples, dy))
 epsilon =  np.random.standard_normal((num_samples, dy))
+
+#print(delta[0])
+#print(U[0])
+#exit()
 
 Y = np.zeros([num_samples, dy])
 for i in range(0, num_samples):
@@ -67,22 +83,30 @@ for i in range(0, num_samples):
 
 std_dev_Y = np.std(Y)
 mean_Y = np.mean(Y)
-print(std_dev_Y)
-print(mean_Y)
+#print(std_dev_Y)
+#print(mean_Y)
 
 Z=(Y-mean_Y)*(1/std_dev_Y)
 
 std_dev_Z = np.std(Z)
 mean_Z = np.mean(Z)
-print(std_dev_Z)
-print(mean_Z)
+#print(std_dev_Z)
+#print(mean_Z)
 
 Z=(1/std_dev_Y)*Y - mean_Y
 
 std_dev_Z = np.std(Z)
 mean_Z = np.mean(Z)
-print(std_dev_Z)
-print(mean_Z)
+#print(std_dev_Z)
+#print(mean_Z)
 
-np.savetxt('data/X_nt.csv',X, delimiter=',')
-np.savetxt('data/Y_nt.csv',Y, delimiter=',')
+#np.savetxt('data/X_nt.csv',X, delimiter=',')
+#np.savetxt('data/Y_nt.csv',Y, delimiter=',')
+
+#print("BLA")
+np.save('data/X_nt.npy',X)
+np.save('data/Y_nt.npy',Y)
+
+te = time()
+print('Finished gen_data for ' + str(num_samples) + ' samples: took %2.4f seconds.' % (te-ts))
+

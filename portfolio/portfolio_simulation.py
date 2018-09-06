@@ -3,6 +3,8 @@ import time
 import logging
 import portfolio_simulator
 import torch
+from available_cpu_count import available_cpu_count
+import argparse
 
 # note: levels are:
 # CRITICAL
@@ -24,10 +26,13 @@ else:
     device = torch.device('cpu')
 
 # parse arguments
-import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("-d", "--sanity", help="make code deterministic and use small existing dataset for debugging", action="store_true")
+parser.add_argument("-o", "--output_dir", type=str, help="directory in which to output any generated files", required=True)
+parser.add_argument("-s", "--sanity", help="make code deterministic and use 1000-sample existing dataset for debugging", action="store_true")
+parser.add_argument("-r", "--short", help="make code deterministic and use 10,000-sample existing dataset for debugging", action="store_true")
 parser.add_argument("-p", "--profile", help="turn on advanced profiling", action="store_true")
+parser.add_argument('-c','--compute_nodes', nargs='+', help='compute node names', required=True)
+parser.add_argument('-m','--compute_nodes_pythonic', nargs='+', help='python-friendly compute node names', required=True)
 args = parser.parse_args()
 
 # configure logger
@@ -44,8 +49,12 @@ logger.addHandler(ch)
 logger.info(time.ctime())
 logger.info("Start portfolio simulation")
 num_iterations=1
+#num_samples_list=[8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 num_samples_list=[8]
-simulator = portfolio_simulator.Portfolio_simulator("simulator", num_iterations, num_samples_list, args.sanity, args.profile, "data/X_nt.csv", "data/Y_nt.csv", device)
+
+simulator = portfolio_simulator.Portfolio_simulator("simulator", args.compute_nodes, args.compute_nodes_pythonic,
+                                                    num_iterations, num_samples_list, args.output_dir, args.sanity,
+                                                    args.short, args.profile, "data/X_nt.npy", "data/Y_nt.npy", device)
 simulator.run_simulation()
 logger.info("End portfolio simulation")
 logger.info(time.ctime())

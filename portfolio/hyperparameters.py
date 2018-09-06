@@ -8,7 +8,7 @@ class Hyperparameters:
         self.bandwidth = bandwidth
 
         # see smoother.py for explanation of these lines
-        self.__class__ = type(self.__class__.__name__, (self.__class__,), {})
+        #self.__class__ = type(self.__class__.__name__, (self.__class__,), {})
         #self.__class__.__call__ = self.weighter_fcn
 
     # see smoother.py for explanation of these lines

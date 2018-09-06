@@ -26,8 +26,9 @@ class Smoother:
         try:
             # make the object callable -- see https://stackoverflow.com/questions/1705928/issue-with-making-object-callable-in-python
             # ie when the object is called as a function, it now calls its smoother function
-            self.__class__ = type(self.__class__.__name__, (self.__class__,), {})
-            self.__class__.__call__ = switcher[name]
+
+            #self.__class__ = type(self.__class__.__name__, (self.__class__,), {})
+            #self.__class__.__call__ = switcher[name]
             
             # also make the selected smoother callable separately in case user doesn't want synctacic sugar of calling object
             self.selected_smoother = switcher[name]

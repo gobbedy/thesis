@@ -4,24 +4,36 @@ from math import sqrt, floor, ceil
 import cvxpy as cp
 import value_at_risk
 import smoother
-#import weighter
 import hyperparameters
 import logging
 from decorators import timed, profile
 import torch
-
+from available_cpu_count import available_cpu_count
+from time import time
+import os
+# import inspect
+import itertools
 from multiprocessing import Pool as ThreadPool
+import dill as pkl
+import dispy
+import functools
+#import time
 
 class Nearest_neighbors_portfolio:
 
-
-    def __init__(self, name, epsilon, __lambda, sanity=False, profile=False):
+    def __init__(self, name, compute_nodes, compute_nodes_pythonic, epsilon, __lambda, output_dir, x_samples_filename, y_samples_filename, sanity=False, short=False, profile=False):
         self.name = name
+        self.compute_nodes = compute_nodes
+        self.compute_nodes_pythonic = compute_nodes_pythonic
         self.epsilon = epsilon
         self.__lambda = __lambda
+        self.output_dir = output_dir
+        self.x_samples_filename = x_samples_filename
+        self.y_samples_filename = y_samples_filename
+        self.sanity = sanity
+        self.short = short
+        self.profile = profile
         self.configure_logger()
-        self.sanity=sanity
-        self.profile=profile
 
     def __str__(self):
         return self.name
@@ -52,7 +64,7 @@ class Nearest_neighbors_portfolio:
     @timed
     def split_data(self):
 
-        if self.sanity:
+        if self.sanity or self.short:
 
             # train on first num_samples_in_dataset samples; note: each row is a sample!
             self.X_tr = self.X_data[0:self.num_samples]
@@ -84,14 +96,50 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_full_information_oos_cost(self):
 
-        fi_learner_oos_cost = 0
-        for x_val in self.X_data:
-            c_fi, z_fi, b_fi, s_fi = self.optimize_nearest_neighbors_portfolio(self.Y_data, self.X_data,
-                                                                               self.hyperparameters_fi, x_val)
-            fi_learner_oos_cost += c_fi
+        # see compute_expected_responses for explanation of this hack
+        global compute_full_information_oos_cost_globals
+        compute_full_information_oos_cost_globals = type('test', (), {})()
+        #compute_full_information_oos_cost_globals = Compute_full_information_oos_cost_vars(torch.from_numpy(self.X_data), torch.from_numpy(self.X_data), torch.from_numpy(self.Y_data), self.hyperparameters_fi, self.epsilon, self.__lambda)
+        #compute_full_information_oos_cost_globals.__module__ = '__main__'
+        compute_full_information_oos_cost_globals.Xbar_tensor = torch.from_numpy(self.X_data)
+        compute_full_information_oos_cost_globals.X_tensor = torch.from_numpy(self.X_data)
+        compute_full_information_oos_cost_globals.Y_tensor = torch.from_numpy(self.Y_data)
+        compute_full_information_oos_cost_globals.hyperparameters_object = self.hyperparameters_fi
+        compute_full_information_oos_cost_globals.epsilon = self.epsilon
+        compute_full_information_oos_cost_globals.__lambda = self.__lambda
+        #generated_data_filepath = self.output_dir + "/autogen/full_information_params.npz"
+        #np.savez(generated_data_filepath, k=self.hyperparameters_fi.k, lower_diag=self.hyperparameters_fi.upper_diag.transpose(0, 1),
+        #         epsilon=self.epsilon, __lambda=self.__lambda)
+
+        num_cores = int(available_cpu_count())
+        #print(num_cores)
+        os.environ["OMP_NUM_THREADS"] = "1"
+
+        #'''
+        pool = ThreadPool(num_cores)
+        print("THIS SHOULD PRINT EARLY")
+        args_iterable = zip(itertools.repeat("compute_full_information_oos_cost_globals"), range(len(self.X_data)))
+        #optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,args_iterable,10)
+        optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio, args_iterable)
+        #'''
+
+        #'''
+        pool.close()
+        pool.join()
+        #'''
+        os.environ.pop("OMP_NUM_THREADS")
 
 
-        return fi_learner_oos_cost/len(self.X_data)
+        # extract only costs from list of portfolio problem tuples (cost is first element of every tuple
+        # see https://stackoverflow.com/a/31297256/8112889
+        full_information_oos_costs_list = list(zip(*optimal_portfolio_list))[0]
+
+        # convert costs list to torch tensor
+        #full_information_oos_costs = torch.stack(full_information_oos_costs_list)
+        full_information_oos_costs = np.array(full_information_oos_costs_list)
+
+        #return torch.mean(full_information_oos_costs)
+        return np.mean(full_information_oos_costs)
         
 
     @timed
@@ -108,17 +156,40 @@ class Nearest_neighbors_portfolio:
     @timed
     def compute_training_model_oos_cost(self):
 
+        # see compute_expected_responses for explanation of this hack
+        global compute_training_model_oos_cost_globals
+        compute_training_model_oos_cost_globals = type('', (), {})()
+        compute_training_model_oos_cost_globals.Xbar_tensor = torch.from_numpy(self.X_val)
+        compute_training_model_oos_cost_globals.X_tensor = torch.from_numpy(self.X_tr)
+        compute_training_model_oos_cost_globals.Y_tensor = torch.from_numpy(self.Y_tr)
+        compute_training_model_oos_cost_globals.hyperparameters_object = self.hyperparameters_tr
+        compute_training_model_oos_cost_globals.epsilon = self.epsilon
+        compute_training_model_oos_cost_globals.__lambda = self.__lambda
+
+        num_cores = int(available_cpu_count())
+        os.environ["OMP_NUM_THREADS"] = "1"
+        pool = ThreadPool(num_cores)
+        optimal_portfolio_list = pool.starmap(Nearest_neighbors_portfolio.compute_optimal_portfolio,
+                        zip(itertools.repeat("compute_training_model_oos_cost_globals"), range(len(self.X_val))))
+
+
+        # extract only costs from list of portfolio problem tuples (cost is first element of every tuple
+        # see https://stackoverflow.com/a/31297256/8112889
+        #####training_oos_costs_list = list(zip(*optimal_portfolio_list))[0]
+
+        # convert costs list to torch tensor
+        #full_information_oos_costs = torch.stack(full_information_oos_costs_list)
+        #####training_oos_costs = np.array(training_oos_costs_list)
+
+        pool.close()
+        pool.join()
+        os.environ.pop("OMP_NUM_THREADS")
+
         tr_learner_oos_cost_true=0
-        logging.info("Performing out of sample test for both (full information and training) NN models with " \
-                     + str(len(self.X_val)) + " oos samples...")
-        for idx, x_val in enumerate(self.X_val):
+        for idx, optimal_portfolio in enumerate(optimal_portfolio_list):
 
-            if idx%10 == 0:
-                logging.debug("out: " + str(idx))
-
-            # oos cost of training learner (based on its knowledge of historical data) -- estimate
-            c_tr, z_tr, b_tr, s_tr = self.optimize_nearest_neighbors_portfolio(self.Y_tr, self.X_tr,
-                                                                               self.hyperparameters_tr, x_val)
+            c_tr, z_tr, b_tr, s_tr = optimal_portfolio
+            x_val = self.X_val[idx]
 
             # find b (VaR) analytically
             b=value_at_risk.value_at_risk(x_val, z_tr, self.epsilon)
@@ -126,7 +197,7 @@ class Nearest_neighbors_portfolio:
             # find true Y|X (returns Y distribution with weights)
             training_loss_fnc = lambda y: self.loss(z_tr, b, y)
             training_loss = np.apply_along_axis(training_loss_fnc, 1, self.Y_data)
-            c_tr_true = self.compute_expected_response(training_loss, self.X_data, x_val, self.hyperparameters_fi)
+            c_tr_true = self.compute_expected_responses(training_loss, self.X_data, x_val, self.hyperparameters_fi)
 
             tr_learner_oos_cost_true += c_tr_true
 
@@ -134,10 +205,13 @@ class Nearest_neighbors_portfolio:
 
 
     @timed
-    def load_data_from_csv(self, x_csv_filename, y_csv_filename):
+    def load_data(self):
 
-        self.X_data = np.loadtxt(x_csv_filename, delimiter=",")
-        self.Y_data = np.loadtxt(y_csv_filename, delimiter=",")
+        #self.X_data = np.loadtxt(x_csv_filename, delimiter=",")
+        #self.Y_data = np.loadtxt(y_csv_filename, delimiter=",")
+        self.X_data = np.load(self.x_samples_filename)
+        self.Y_data = np.load(self.y_samples_filename)
+
 
 
 #    @timed
@@ -195,7 +269,7 @@ class Nearest_neighbors_portfolio:
         k_list = np.unique(np.round(np.linspace(max(1, floor(sqrt(num_samples_in_dataset)/1.5)), min(ceil(sqrt(num_samples_in_dataset)*1.5), num_samples_in_dataset), 20).astype('int')))
 
         # pick 20% of the original (training) samples as your validation set -- note: sorting not necessary
-        if self.sanity:
+        if self.sanity or self.short:
             val = range(round(num_samples_in_dataset*p))
         else:
             val = sorted(random.sample(range(num_samples_in_dataset), round(num_samples_in_dataset*p)))
@@ -223,10 +297,11 @@ class Nearest_neighbors_portfolio:
 
                     
                     # find E[Y|xbar] for all X in validation set
-                    expected_response = self.compute_expected_response(Y[train], X[train], X[val], test_hyperparameters)
+                    expected_responses = self.compute_expected_responses(Y[train], X[train], X[val],
+                                                                         test_hyperparameters)
 
                     # sum distance of all these E[Y|xbar] to true Y (respectively)
-                    model_distance = np.sum((Y[val]-expected_response)**2)
+                    model_distance = np.sum((Y[val]-expected_responses)**2)
 
                     # the shortest such distance corresponds to most accurate model, ie 
                     # this model has best hyperparameters, so we store them
@@ -239,7 +314,7 @@ class Nearest_neighbors_portfolio:
 
     @timed
     @profile
-    def compute_expected_response(self, Y, X, Xbar, hyperparameters_object):
+    def compute_expected_responses(self, Y, X, Xbar, hyperparameters_object):
 
         """
         Arguments:
@@ -265,7 +340,7 @@ class Nearest_neighbors_portfolio:
                -- Smoother transforms distance to weights (eg for gaussian smoother, zero distance is center
                   of gaussian curve and further distances fall with distance from center)
                -- Higher bandwidth reduces distance as seen by smoothing function
-                  -- depending on smoother this could have different effects (for example, for square uniform,
+                  -- depending on smoother this could have different effects (for example, for squaref uniform,
                      will give zero weight to fewer points)
 
         """
@@ -283,165 +358,188 @@ class Nearest_neighbors_portfolio:
         else: # Xbar.dim == 1
             num_observations = 1
 
-        Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
-        X_tensor = torch.from_numpy(X)
-        Y_tensor = torch.from_numpy(Y)
+        # creating a global class is a hack workaround until pathos.multiprocessing supports
+        # passing local large arrays: https://github.com/uqfoundation/pathos/issues/145
+        # TODO: update if/when pathos adds local array support
+        # This will require passing these arrays as arguments to starmap (will need to check if that works)
+        # or making compute_expected_response nested (this is know to work but very slow until pathos fixes)
+        # probably better still would be to make it a closure if that works: https://www.learnpython.org/en/Closures
+        #   -- it will be defined elsewhere, with only the arrays being passed in and the function is generated with
+        # only the j argument. -- will need to check if the resulting function truly creates shared arrays
+        # and doesn't clone
 
-        expected_response = np.zeros((num_observations, num_assets))
+        global compute_expected_responses_globals
+        compute_expected_responses_globals = type('', (), {})() # see https://stackoverflow.com/a/19476841/8112889
+        compute_expected_responses_globals.Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
+        compute_expected_responses_globals.X_tensor = torch.from_numpy(X)
+        compute_expected_responses_globals.Y_tensor = torch.from_numpy(Y)
+        compute_expected_responses_globals.hyperparameters_object = hyperparameters_object
 
-        logging.debug("# Hyper Parameters")
-        logging.debug("1. Number of nearest neighbors k = " + str(hyperparameters_object.k))
-        logging.debug("2. Smoother = " + str(hyperparameters_object))
-        logging.debug("# Problem Parameters")
-        logging.debug("1. Number of samples num_samples_in_dataset = " + str(num_samples_in_dataset))
-        logging.debug("2. Label dimension : " + str(num_assets))
-        logging.debug("3. Number of contexts : " + str(num_observations))
+        ts = time()
+        num_cores = int(available_cpu_count())
+        #num_cores = 32
+        #print(num_cores)
+        #exit()
+        os.environ["OMP_NUM_THREADS"] = "1"
+        pool = ThreadPool(num_cores)
+        #pool.map(Nearest_neighbors_portfolio.compute_expected_response, range(num_observations))
+        expected_responses_list = pool.starmap(Nearest_neighbors_portfolio.compute_expected_response,
+                                zip(itertools.repeat("compute_expected_responses_globals"), range(num_observations)))
 
-        for j in range(num_observations):
+        pool.close()
+        pool.join()
+        te = time()
+        os.environ.pop("OMP_NUM_THREADS")
 
-            ## Context of interest
-            xbar = Xbar_tensor[j]
+        expected_responses = torch.stack(expected_responses_list).numpy()
+        #'''
 
-            # x1 - x2
-            Xsub = X_tensor - xbar
-            Z = torch.trtrs(Xsub.transpose(0,1), hyperparameters_object.upper_diag.transpose(0,1), upper=False)[
-                0].transpose(0,1)
+        #print(expected_responses_list[0])
+        #print(type(expected_responses_list[0]))
+        #exit()
+        #expected_responses = torch.stack(expected_responses_list).numpy()
+        #expected_responses = expected_responses_list.numpy()
 
-            # mahalanobis_distances: mahalanobis distance of each X vector to Xbar
-            # L2 norm -- note: square root not necessary, since we only car about sorting not absolute actual number
-            # but since speed of this call is not a bottleneck, this is fine
-            mahalanobis_distances = torch.norm(Z, p=2, dim=1)
+        return expected_responses
 
-            ## SORT the data based on distance to xbar
-            mahalanobis_distances_sorted, sorted_indices = torch.sort(mahalanobis_distances, 0)
-
-            Y_sorted = Y_tensor[sorted_indices] # now local scope
-
-            # adjust k to avoid eliminating equi-distant points
-            inclusive_distance_boundary = mahalanobis_distances_sorted[hyperparameters_object.k - 1] + 1e-7
-
-            # cast to int because of weird incompatibility between zero-dim tensor and int in pytorch 0.4.0
-            inclusive_k = int(np.searchsorted(mahalanobis_distances_sorted, inclusive_distance_boundary,side='right'))
-
-            # get indices of nearest neighbors
-            inclusive_k_nearest_neighbor_indices = np.arange(inclusive_k)
-
-            '''
-            # This is a template for applying non-naive smoother to weigh nearest-neighbor points
-            # The code was functionally tested and can be used as is except the for loop for which a form of 
-            # broadcasting should be found, if possible for the smoother in question (for speed)           
-            weights = mahalanobis_distances[inclusive_k_nearest_neighbor_indices] / hyperparameters_object.bandwidth
-            for i in inclusive_k_nearest_neighbor_indices:
-                weights[i] = hyperparameters_object.smoother(weights[i])
-            weights = weights / sum(weights)
-            
-            # unsqueeze(1)/view(inclusive_k, 1) for broadcast multiplication to work as expected;
-            # double() needed because smoother tested (naive) spits out a float (1.0) value instead of double.
-            # double() likely won't be needed if/when this actually needs to be used
-            # since smoother will likely divide/multiply an existing double() and therefore return a double
-            weights = weights.view(inclusive_k, 1).double()
-
-            # E[Y|xbar], ie weighted/"smoothed" average of the Y[i,:] corresponding to the nearest inclusive_k X
-            expected_response[j] = torch.sum(weights * Y_tensor[inclusive_k_nearest_neighbor_indices].view(
-                inclusive_k, num_assets), 0)
-            
-            '''
-            expected_response[j] = torch.mean(Y_sorted[inclusive_k_nearest_neighbor_indices], 0)
-
-        return expected_response
-    
-#    @timed
-    def optimize_nearest_neighbors_portfolio(self, Y, X, hyperparameters_object, xbar):
-
-        num_samples_in_dataset = np.size(Y, 0)
-
-        num_assets = np.size(Y, 1)
-
-        logging.debug("## Problem Parameters")
-        logging.debug("1. Risk level CVaR epsilon = " + str(self.epsilon))
-        logging.debug("2. Risk / Reward trade off __lambda = " + str(self.__lambda))
-        logging.debug("## Problem dimensions ")
-        logging.debug("1. Number of samples num_samples_in_dataset = " + str(num_samples_in_dataset))
-        logging.debug("2. Label dimension : " + str(num_assets))
-        logging.debug("## Hyper parameters")
-        logging.debug("1. Number of nearest neighbors k = " + str(hyperparameters_object.k))
-        logging.debug("2. Hyperparameters hyperparameters_object = " + str(hyperparameters_object))
-
-        ## SORT the data based on distance to xbar        
+    @staticmethod
+    def compute_expected_response(global_arrays_class_name, j):
 
         ## Context of interest
-        # if I only input one observation, num_observations=1 and xbar = Xbar
-        xbar_tensor = torch.from_numpy(xbar)
+        #####xbar = compute_expected_responses_globals.Xbar_tensor[j]
+        global_arrays = globals()[global_arrays_class_name]
+        xbar = global_arrays.Xbar_tensor[j]
 
-        X_tensor = torch.from_numpy(X)
-        Y_tensor = torch.from_numpy(Y)
+        sorted_nearest_neighbors = Nearest_neighbors_portfolio.compute_sorted_nearest_neighbors(global_arrays, xbar)
+
+        return torch.mean(sorted_nearest_neighbors, 0)
+
+    @staticmethod
+    def compute_sorted_nearest_neighbors(global_arrays, xbar):
 
         # x1 - x2
-        Xsub = X_tensor - xbar_tensor
-        Z = torch.empty(X_tensor.size())
-        for i in range(num_samples_in_dataset):
-            # z = Linv * (x - xbar), where L is lower diagonal matrix
-            Z[i] = torch.trtrs(Xsub[i], hyperparameters_object.upper_diag.transpose(0, 1), upper=False)[0].transpose(0, 1)
+        #####Xsub = (compute_expected_responses_globals.X_tensor - xbar).transpose(0, 1)
+        #x_tensor = globals()[global_arrays_class_name].X_tensor
+        Xsub = (global_arrays.X_tensor - xbar).transpose(0, 1)
 
-        # L2 norm -- note: square root not necessary, algorithm that doesn't take it could be faster
-        # but since speed is not the objective here, this is fine
-        # mahalanobis_distances = torch.norm(X_tensor)
+        #####lower_diag = compute_expected_responses_globals.hyperparameters_object.upper_diag.clone().transpose(0, 1)
+        hyperparameters_obj = global_arrays.hyperparameters_object
+        lower_diag = hyperparameters_obj.upper_diag.clone().transpose(0, 1)
+        Z = torch.trtrs(Xsub, lower_diag, upper=False)[0].transpose(0, 1)
+
+        # mahalanobis_distances: mahalanobis distance of each X vector to Xbar
+        # L2 norm -- note: square root not necessary, since we only car about sorting not absolute actual number
+        # but since speed of this call is not a bottleneck, this is fine
         mahalanobis_distances = torch.norm(Z, p=2, dim=1)
 
-        mahalanobis_distances, perm = torch.sort(mahalanobis_distances, 0)
-        Y_nn = Y_tensor[perm].numpy() # now local scope
+        ## SORT the data based on distance to xbar
+        mahalanobis_distances_sorted, sorted_indices = torch.sort(mahalanobis_distances, 0)
 
-        # Define set of points of interest
-        inclusive_distance_boundary = mahalanobis_distances[hyperparameters_object.k - 1] + 1e-7
+        #####Y_sorted = compute_expected_responses_globals.Y_tensor[sorted_indices]  # now local scope
+        Y_sorted = global_arrays.Y_tensor[sorted_indices]  # now local scope
 
-        # adjusted k to avoid eliminating equi-distant points
-        inclusive_k_nearest_neighbor_indices = torch.nonzero(mahalanobis_distances <= inclusive_distance_boundary).squeeze().numpy()
+        # adjust k to avoid eliminating equi-distant points
+        #####k = compute_expected_responses_globals.hyperparameters_object.k
+        k = global_arrays.hyperparameters_object.k
+        inclusive_distance_boundary = mahalanobis_distances_sorted[k - 1] + 1e-7
 
-        # TODO: apply_along_axis is NOT fast -- use pytorch (perhaps with original loop) for speedup
-        weight_from_xbar = lambda x1: hyperparameters_object.smoother(x1 / hyperparameters_object.bandwidth)
-        # self.smoother(self.distance(x1, x2) / self.bandwidth)
-        if inclusive_k_nearest_neighbor_indices.ndim > 0:
-            S = np.empty_like(inclusive_k_nearest_neighbor_indices)
-            for i in inclusive_k_nearest_neighbor_indices:
-                S[i] = weight_from_xbar(mahalanobis_distances[i])
-        # handle case where inclusive_k_nearest_neighbor_indices is scalar ("0-d array" technically)
-        else:
-            S = weight_from_xbar(mahalanobis_distances[inclusive_k_nearest_neighbor_indices])
+        # cast to int because of weird incompatibility between zero-dim tensor and int in pytorch 0.4.0
+        inclusive_k = int(np.searchsorted(mahalanobis_distances_sorted, inclusive_distance_boundary, side='right'))
 
-        # Objective -- L is loss L(y,z) -- heavier weight to points closer to xbar
-        # ie with greater distance ie higher hyperparameters_object
-        # since this is a minimization not clear why need to divide by the sum of all distances?
+        # get indices of nearest neighbors
+        inclusive_k_nearest_neighbor_indices = np.arange(inclusive_k)
 
-        # OPTIMIZATION FORMULATION
+        '''
+        # This is a template for applying non-naive smoother to weigh nearest-neighbor points
+        # The code was functionally tested and can be used as is except the for loop for which a form of 
+        # broadcasting should be found, if possible for the smoother in question (for speed)           
+        weights = mahalanobis_distances[inclusive_k_nearest_neighbor_indices] / hyperparameters_object.bandwidth
+        for i in inclusive_k_nearest_neighbor_indices:
+            weights[i] = hyperparameters_object.smoother(weights[i])
+        weights = weights / sum(weights)
+
+        # unsqueeze(1)/view(inclusive_k, 1) for broadcast multiplication to work as expected;
+        # double() needed because smoother tested (naive) spits out a float (1.0) value instead of double.
+        # double() likely won't be needed if/when this actually needs to be used
+        # since smoother will likely divide/multiply an existing double() and therefore return a double
+        weights = weights.view(inclusive_k, 1).double()
+
+        # E[Y|xbar], ie weighted/"smoothed" average of the Y[i,:] corresponding to the nearest inclusive_k X
+        expected_response[j] = torch.sum(weights * Y_tensor[inclusive_k_nearest_neighbor_indices].view(
+            inclusive_k, num_assets), 0)
+
+        '''
+
+        return Y_sorted[inclusive_k_nearest_neighbor_indices]
+
+
+#    @timed
+    @staticmethod
+    def compute_optimal_portfolio(global_arrays_class_name, j):
+        import random
+        import numpy as np
+        from math import sqrt, floor, ceil
+        import cvxpy as cp
+        import smoother
+        import hyperparameters
+        import torch
+        import os
+
+        #os.environ["OMP_NUM_THREADS"] = "1"
+        #if j%100 == 0:
+        #    print("compute_optimal_portfolio: start k-nearest: ", j)
+
+        # 1. get nearest neighbors
+        global_arrays = globals()[global_arrays_class_name]
+        xbar = global_arrays.Xbar_tensor[j]
+
+        sorted_nn_tensor = Nearest_neighbors_portfolio.compute_sorted_nearest_neighbors(global_arrays, xbar)
+        nearest_neighbors = sorted_nn_tensor.numpy()
+
+        # 2. set up optimization problem
+        loss_len = len(nearest_neighbors)
+        num_assets = global_arrays.Y_tensor.size(1)
         z = cp.Variable(num_assets)
-        L = cp.Variable(len(inclusive_k_nearest_neighbor_indices))
+        L = cp.Variable(loss_len)
         b = cp.Variable(1)
 
         # note: just "sum" instead of long sum_entries command appears to work
-        obj = cp.Minimize(sum(cp.multiply(S,L))/sum(S))
+
+        #print("compute_optimal_portfolio: start A: ", j)
+        obj = cp.Minimize(cp.sum(L)/loss_len)
 
         # Constraints
         # long only and unit leverage
         constrs = [z>=0, sum(z)==1]
 
+        epsilon = global_arrays.epsilon
+        __lambda = global_arrays.__lambda
 
-        for i in inclusive_k_nearest_neighbor_indices:
+        for i in range(loss_len):
             # this must define the loss function L. Second part obvious
             # not sure why first part is the same?
-            constrs = constrs + [L[i] >= (1-1/self.epsilon)*b - (self.__lambda+1/self.epsilon)*sum(cp.multiply(Y_nn[i], z))]
-            constrs = constrs + [L[i] >= b - self.__lambda*sum(cp.multiply(Y_nn[i, :], z))]
+            constrs = constrs + [L[i] >= (1-1/epsilon)*b - (__lambda+1/epsilon)*sum(cp.multiply(nearest_neighbors[i], z))]
+            constrs = constrs + [L[i] >= b - __lambda*sum(cp.multiply(nearest_neighbors[i, :], z))]
 
         # find optimal z, VaR (b) -- which minimizes total cost
         # this minimum total cost (over hitorical points) is problem.optval
+
+        #print("compute_optimal_portfolio: start B: ", j)
         problem=cp.Problem(obj, constrs)
+
+
+        # 3. now, optimize
 
         # note: ECOS solver would probably be picked by cvxpy
         # TODO: run with default, see if it picks a faster one / compare speed of different solvers
         # note: more solvers can be added to core cvxpy
-        # see "choosing a solver": http://www.cvxpy.org/tutorial/advanced/index.html 
+        # see "choosing a solver": http://www.cvxpy.org/tutorial/advanced/index.html
         # note that SCS can use GPUs -- See https://github.com/cvxgrp/cvxpy/issues/245
         # can Boyd's POGS solver be used?
         # look into warm start -- make sure it is leveraged
+        #print("compute_optimal_portfolio: start optimization: ", j)
         problem.solve(solver=cp.ECOS)
+
+        #os.environ.pop("OMP_NUM_THREADS")
 
         return (problem.value, z.value, b.value, problem.status)
