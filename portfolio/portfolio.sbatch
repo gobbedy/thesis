@@ -26,18 +26,22 @@ function info
 ######################################################################
 
 # get node prefix (eg gra, cdr, nia)
-node_prefix=$(echo ${SLURM_JOB_NODELIST} | cut -c1-3)
+node_prefix=$(echo ${SLURM_JOB_NODELIST} | grep -oP '^[^\[]+')
 
 # get node suffix for python, and login node
 # eg in python cedar nodes are "cdr1132.int.cedar.computecanada.ca" instead of "cdr1132"
 case "$node_prefix" in
   gra)
     python_node_suffix=''
-    login_node="FILL THIS IN LATER"
+    login_node="gra-login1"
   ;;
   cdr)
     python_node_suffix='.int.cedar.computecanada.ca'
     login_node="cedar1"
+  ;;
+  cp)
+    python_node_suffix=''
+    login_node="ip15"
   ;;
 esac
 
@@ -143,8 +147,8 @@ fi
 #  # as we wait for each ssh command to finish sequentially
 #  ssh -f ${node_name} "launch_dispynode.sh ${dispynode_logfile}"
 #done
-#launch_remote_dispynodes.sh ${output_dir} "${node_name_list[@]}"
-#launched_dispynodes=1
+launch_remote_dispynodes.sh ${output_dir} "${node_name_list[@]}"
+launched_dispynodes=1
 
 ######################################################################
 # Launch pythons simulation
