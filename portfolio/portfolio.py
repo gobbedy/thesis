@@ -13,10 +13,11 @@ from time import time
 import os
 # import inspect
 import itertools
-from pathos.multiprocessing import Pool as ThreadPool
+from multiprocessing import Pool as ThreadPool
 import dill as pkl
 import dispy
 import functools
+import time
 
 ME_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -621,13 +622,57 @@ class Nearest_neighbors_portfolio:
         # only the j argument. -- will need to check if the resulting function truly creates shared arrays
         # and doesn't clone
 
-        global compute_expected_responses_globals
-        compute_expected_responses_globals = type('', (), {})() # see https://stackoverflow.com/a/19476841/8112889
-        compute_expected_responses_globals.Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
-        compute_expected_responses_globals.X_tensor = torch.from_numpy(X)
-        compute_expected_responses_globals.Y_tensor = torch.from_numpy(Y)
-        compute_expected_responses_globals.hyperparameters_object = hyperparameters_object
+        #global compute_expected_responses_globals
+        #compute_expected_responses_globals = type('', (), {})() # see https://stackoverflow.com/a/19476841/8112889
+        #compute_expected_responses_globals.Xbar_tensor = torch.from_numpy(Xbar).view(num_observations, -1)
+        #compute_expected_responses_globals.X_tensor = torch.from_numpy(X)
+        #compute_expected_responses_globals.Y_tensor = torch.from_numpy(Y)
+        #compute_expected_responses_globals.hyperparameters_object = hyperparameters_object
 
+        #'''
+        generated_data_filepath = self.output_dir + '/autogen/compute_expected_responses_params.npz'
+        np.savez(generated_data_filepath, k=hyperparameters_object.k, lower_diag=hyperparameters_object.upper_diag.transpose(0, 1),
+                 x=X, y=Y, xbar=Xbar.reshape(num_observations,-1))
+
+        # change working directory temporarily to force JobCluster command to dump in the proper output directory
+        original_working_dir = os.getcwd()
+        os.chdir(self.output_dir + '/' + 'dispy')
+
+        # tell dispy where all the compute nodes are and set them up using setup command
+        cluster = dispy.JobCluster(compute_expected_response, nodes=self.compute_nodes_pythonic, setup=functools.partial(setup_expected_responses, generated_data_filepath))
+        #cluster = dispy.JobCluster(compute_optimal_portfolio, nodes=["nia1189.scinet.local", ], setup=setup)
+
+        # return to original working dir to avoid any unintended effects from dir change
+        os.chdir(original_working_dir)
+
+        jobs = []
+
+        for i in range(num_observations):
+        #for i in range(10):
+            #self.i = i
+            job = cluster.submit(i) # it is sent to a node for executing 'compute'
+            #job.id = i # store this object for later use
+            jobs.append(job)
+
+        #expected_responses_list = np.empty(len(self.Xbar))
+        expected_responses_list = torch.empty(num_observations, num_assets)
+        for idx, job in enumerate(jobs):
+            job() # wait for job to finish
+            #BLA")
+            #print(job.result)
+            #print("BLU")
+            #exit()
+            expected_responses_list[idx] = job.result
+
+        cluster.close()
+        
+        # relaunch dispynodes because of this bug: https://github.com/pgiri/dispy/issues/143
+        #cmd_str = 'launch_remote_dispynodes.sh ' + self.output_dir + ' ' + ' '.join(self.compute_nodes)
+        #os.system(cmd_str)
+        #time.sleep(3)
+        #'''
+
+        '''
         ts = time()
         num_cores = int(available_cpu_count())
         #num_cores = 32
@@ -642,19 +687,14 @@ class Nearest_neighbors_portfolio:
         pool.close()
         pool.join()
         te = time()
-        os.environ.pop("OMP_NUM_THREADS")
+        #os.environ.pop("OMP_NUM_THREADS")
 
         expected_responses = torch.stack(expected_responses_list).numpy()
-        #'''
+        '''
 
-        #print(expected_responses_list[0])
-        #print(type(expected_responses_list[0]))
-        #exit()
-        #expected_responses = torch.stack(expected_responses_list).numpy()
-        #expected_responses = expected_responses_list.numpy()
+        expected_responses = expected_responses_list.numpy()
 
         return expected_responses
-
 
     @staticmethod
     def compute_expected_response(global_arrays_class_name, j):
